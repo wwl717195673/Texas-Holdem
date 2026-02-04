@@ -24,3 +24,8 @@ prd/           # Product Requirements Documents directory
 ## Technology Stack
 
 - Language: Go (Golang)
+
+## Notes
+- 每一个方法都加上方法级别的中文注释
+- 当一个方法超过 30 行代码时，给这个方法的关键节点也加上中文注释
+- 每次代码实现都生成 1 个实现文档，写明本次生成做了什么 怎么做的,文件名为本次实现的基本功能 简短一点 markdown格式
