@@ -31,6 +31,7 @@ type Config struct {
 	MaxPlayers     int // 最多玩家数
 	SmallBlind     int // 小盲注金额
 	BigBlind       int // 大盲注金额
+	Ante           int // 前注金额（可选）
 	StartingChips  int // 初始筹码
 	ActionTimeout  int // 动作超时时间
 }
@@ -76,9 +77,10 @@ func (s Stage) String() string {
 }
 
 // SidePot 表示边池
+// 边池按照贡献金额从小到大排列，MainPot 是最后一个（最大的）边池
 type SidePot struct {
-	Amount          int   // 边池金额
-	EligiblePlayers []int // 有资格获得边池的玩家索引列表
+	Amount          int     // 该边池总金额
+	EligiblePlayers []int  // 有资格获得该边池的玩家索引列表（按手牌强度排序）
 }
 
 // NewEngine 创建新的游戏引擎
@@ -211,6 +213,9 @@ func (e *GameEngine) StartHand() error {
 		}
 	}
 
+	// 扣除前注（如果有配置）
+	e.collectAnte()
+
 	// 扣除盲注
 	e.collectBlinds()
 
@@ -286,6 +291,14 @@ func (e *GameEngine) PlayerAction(playerID string, action models.ActionType, amo
 		Amount:   player.CurrentBet,
 	})
 
+	// 检查是否只剩一名未弃牌玩家（提前结束判定）
+	if e.checkEarlyFinish() {
+		e.state.Stage = StageShowdown
+		e.determineWinners()
+		e.notifyStateChange()
+		return nil
+	}
+
 	// 检查下注轮是否结束
 	if e.isBettingRoundComplete() {
 		e.advanceBettingRound()
@@ -298,6 +311,166 @@ func (e *GameEngine) PlayerAction(playerID string, action models.ActionType, amo
 }
 
 // ==================== 私有方法 ====================
+
+// checkEarlyFinish 检查是否只剩一名未弃牌玩家，可以提前结束
+// 如果只剩一名活跃玩家，该玩家直接获胜
+func (e *GameEngine) checkEarlyFinish() bool {
+	activePlayers := e.getActivePlayers()
+	if len(activePlayers) == 1 {
+		// 只剩一名活跃玩家，直接获胜
+		e.state.Stage = StageShowdown
+		return true
+	}
+	return false
+}
+
+// collectAnte 扣除前注（如果有配置）
+func (e *GameEngine) collectAnte() {
+	if e.config.Ante <= 0 {
+		return
+	}
+
+	for _, p := range e.state.Players {
+		if p.Status == models.PlayerStatusActive && p.Chips > 0 {
+			anteAmount := min(p.Chips, e.config.Ante)
+			p.Chips -= anteAmount
+			p.CurrentBet += anteAmount
+			e.state.Pot += anteAmount
+		}
+	}
+}
+
+// collectSidePots 收集并创建边池
+// 边池逻辑：
+// 1. 收集所有活跃玩家和全下玩家的当前下注
+// 2. 找出最小下注金额，该金额形成主池
+// 3. 下注金额大于最小值的部分，检查是否有其他玩家也贡献了相同金额，形成边池
+// 4. 递归处理直到所有下注都分配完毕
+func (e *GameEngine) collectSidePots() {
+	// 收集所有需要处理下注的玩家（下注 > 0）
+	bettingPlayers := make([]struct {
+		idx       int
+		bet       int
+		isAllIn   bool
+		isActive  bool
+	}, 0)
+
+	for i, p := range e.state.Players {
+		if p.CurrentBet > 0 {
+			bettingPlayers = append(bettingPlayers, struct {
+				idx       int
+				bet       int
+				isAllIn   bool
+				isActive  bool
+			}{
+				idx:      i,
+				bet:      p.CurrentBet,
+				isAllIn:  p.Status == models.PlayerStatusAllIn,
+				isActive: p.Status == models.PlayerStatusActive,
+			})
+		}
+	}
+
+	if len(bettingPlayers) == 0 {
+		return
+	}
+
+	// 按下注金额从小到大排序
+	// 这样可以正确创建多个边池
+	for i := 0; i < len(bettingPlayers)-1; i++ {
+		for j := i + 1; j < len(bettingPlayers); j++ {
+			if bettingPlayers[i].bet > bettingPlayers[j].bet {
+				bettingPlayers[i], bettingPlayers[j] = bettingPlayers[j], bettingPlayers[i]
+			}
+		}
+	}
+
+	// 创建边池
+	// 从最小下注开始创建池
+	minBet := bettingPlayers[0].bet
+	eligibleForMain := make([]int, 0)
+
+	// 找出所有贡献了 minBet 的玩家
+	for _, bp := range bettingPlayers {
+		if bp.bet >= minBet {
+			eligibleForMain = append(eligibleForMain, bp.idx)
+		}
+	}
+
+	// 主池金额 = minBet * 有资格获得的玩家数
+	mainPotAmount := minBet * len(eligibleForMain)
+	if mainPotAmount > 0 {
+		e.state.SidePots = append(e.state.SidePots, SidePot{
+			Amount:          mainPotAmount,
+			EligiblePlayers: eligibleForMain,
+		})
+	}
+
+	// 从所有玩家下注中扣除已分配到主池的金额
+	for i := range e.state.Players {
+		e.state.Players[i].CurrentBet -= minBet
+	}
+
+	// 递归处理剩余下注（形成边池）
+	e.collectRemainingSidePots()
+}
+
+// collectRemainingSidePots 收集剩余的边池（递归辅助函数）
+func (e *GameEngine) collectRemainingSidePots() {
+	// 收集剩余下注 > 0 的玩家
+	remainingPlayers := make([]struct {
+		idx    int
+		bet    int
+	}, 0)
+
+	for i, p := range e.state.Players {
+		if p.CurrentBet > 0 {
+			remainingPlayers = append(remainingPlayers, struct {
+				idx    int
+				bet    int
+			}{i, p.CurrentBet})
+		}
+	}
+
+	if len(remainingPlayers) == 0 {
+		// 所有下注都已分配，将累积的底池清零
+		e.state.Pot = 0
+		return
+	}
+
+	// 找出最小下注
+	minBet := remainingPlayers[0].bet
+	for _, rp := range remainingPlayers {
+		if rp.bet < minBet {
+			minBet = rp.bet
+		}
+	}
+
+	// 找出有资格获得这个池的玩家
+	eligible := make([]int, 0)
+	for _, rp := range remainingPlayers {
+		if rp.bet >= minBet {
+			eligible = append(eligible, rp.idx)
+		}
+	}
+
+	// 创建边池
+	potAmount := minBet * len(eligible)
+	if potAmount > 0 {
+		e.state.SidePots = append(e.state.SidePots, SidePot{
+			Amount:          potAmount,
+			EligiblePlayers: eligible,
+		})
+	}
+
+	// 扣除已分配的下注
+	for i := range e.state.Players {
+		e.state.Players[i].CurrentBet -= minBet
+	}
+
+	// 递归处理
+	e.collectRemainingSidePots()
+}
 
 // rotateDealerButton 轮转庄家按钮
 func (e *GameEngine) rotateDealerButton() {
@@ -323,7 +496,7 @@ func (e *GameEngine) rotateDealerButton() {
 	}
 }
 
-// collectBlinds 扣除盲注
+// collectBlinds 扣除盲注（会在前注之后执行）
 func (e *GameEngine) collectBlinds() {
 	dealerIdx := e.state.DealerButton
 	sbIdx, bbIdx := -1, -1
@@ -434,6 +607,9 @@ func (e *GameEngine) nextPlayer() {
 
 // advanceBettingRound 进入下一轮下注
 func (e *GameEngine) advanceBettingRound() {
+	// 在进入下一轮之前，收集本轮的边池
+	e.collectSidePots()
+
 	// 重置所有玩家的行动状态
 	for _, p := range e.state.Players {
 		p.HasActed = false
@@ -483,8 +659,15 @@ func (e *GameEngine) findFirstToAct() int {
 	return 0
 }
 
-// determineWinners 判定获胜者并分配底池
+// determineWinners 判定获胜者并分配底池（支持边池结算）
 func (e *GameEngine) determineWinners() {
+	// 如果有边池，按边池依次结算
+	if len(e.state.SidePots) > 0 {
+		e.determineWinnersWithSidePots()
+		return
+	}
+
+	// 没有边池时，使用原有逻辑
 	var bestEval evaluator.HandEvaluation
 	var bestPlayerIdx int = -1
 	ties := []int{} // 平局玩家列表
@@ -525,6 +708,82 @@ func (e *GameEngine) determineWinners() {
 		e.state.Players[bestPlayerIdx].Chips += e.state.Pot
 	}
 
+	e.state.Pot = 0
+}
+
+// determineWinnersWithSidePots 使用边池结算判定获胜者
+func (e *GameEngine) determineWinnersWithSidePots() {
+	// 首先评估所有有资格参与摊牌的玩家
+	// 有资格 = 活跃(未弃牌) 或 全下
+	qualifiedPlayers := make(map[int]evaluator.HandEvaluation)
+
+	for i, p := range e.state.Players {
+		if p.Status == models.PlayerStatusActive || p.Status == models.PlayerStatusAllIn {
+			eval := e.evaluator.Evaluate(p.HoleCards, e.state.CommunityCards)
+			qualifiedPlayers[i] = eval
+		}
+	}
+
+	// 按边池从最后一个（主池）到第一个依次结算
+	// 实际上我们存储的顺序是从小到大，所以需要逆序处理
+	for i := len(e.state.SidePots) - 1; i >= 0; i-- {
+		pot := &e.state.SidePots[i]
+		if len(pot.EligiblePlayers) == 0 {
+			continue
+		}
+
+		// 找出该池有资格玩家中手牌最强的
+		var bestEval evaluator.HandEvaluation
+		var bestPlayerIdx int = -1
+		ties := []int{}
+
+		for _, playerIdx := range pot.EligiblePlayers {
+			eval, ok := qualifiedPlayers[playerIdx]
+			if !ok {
+				// 该玩家可能已经弃牌，没有资格获得这个池
+				continue
+			}
+
+			if bestPlayerIdx < 0 {
+				bestEval = eval
+				bestPlayerIdx = playerIdx
+			} else {
+				cmp := e.evaluator.Compare(eval, bestEval)
+				if cmp > 0 {
+					bestEval = eval
+					bestPlayerIdx = playerIdx
+					ties = []int{playerIdx}
+				} else if cmp == 0 {
+					ties = append(ties, playerIdx)
+				}
+			}
+		}
+
+		// 分配边池
+		if len(ties) > 0 {
+			// 平分边池
+			share := pot.Amount / len(ties)
+			remainder := pot.Amount % len(ties)
+			for _, idx := range ties {
+				e.state.Players[idx].Chips += share
+				if remainder > 0 {
+					e.state.Players[idx].Chips++
+					remainder--
+				}
+			}
+		} else if bestPlayerIdx >= 0 {
+			// 单人获胜
+			e.state.Players[bestPlayerIdx].Chips += pot.Amount
+		}
+
+		// 已结算的边池移除（从 qualifiedPlayers 中移除已获得池的玩家）
+		// 注意：获胜玩家可能还能参与其他边池的结算
+		// 但在德州扑克中，同一玩家可以在多个边池中都获胜
+		// 所以不需要从 qualifiedPlayers 中移除
+	}
+
+	// 清空边池
+	e.state.SidePots = make([]SidePot, 0)
 	e.state.Pot = 0
 }
 
