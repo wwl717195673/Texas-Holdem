@@ -50,6 +50,7 @@ type GameState struct {
 	CommunityCards [5]card.Card       // 公共牌
 	Players        []*models.Player    // 所有玩家
 	Actions        []models.PlayerAction // 动作记录
+	LastShowdown   *ShowdownResult     // 最近一局的结算结果
 }
 
 // Stage 表示当前的下注阶段
@@ -83,6 +84,28 @@ func (s Stage) String() string {
 type SidePot struct {
 	Amount          int     // 该边池总金额
 	EligiblePlayers []int  // 有资格获得该边池的玩家索引列表（按手牌强度排序）
+}
+
+// ShowdownResult 结算结果（每局结束后填充，用于广播给客户端）
+type ShowdownResult struct {
+	Players  []PlayerResult // 每位参与摊牌的玩家结果
+	TotalPot int            // 本局总底池
+	IsEarlyEnd bool         // 是否提前结束（其他人全弃牌）
+}
+
+// PlayerResult 单个玩家的结算结果
+type PlayerResult struct {
+	PlayerIdx  int                    // 玩家在列表中的索引
+	PlayerName string                 // 玩家名称
+	HoleCards  [2]card.Card           // 底牌
+	HandRank   evaluator.HandRank    // 牌型等级
+	HandName   string                 // 牌型名称（如"一对"、"同花顺"）
+	BestCards  []card.Card            // 构成最佳牌的5张牌
+	WonAmount  int                    // 赢得的筹码
+	IsWinner   bool                   // 是否为赢家
+	IsFolded   bool                   // 是否已弃牌
+	ChipsBefore int                   // 结算前筹码
+	ChipsAfter  int                   // 结算后筹码
 }
 
 // NewEngine 创建新的游戏引擎
@@ -342,6 +365,10 @@ func (e *GameEngine) PlayerAction(playerID string, action models.ActionType, amo
 	if e.checkEarlyFinish() {
 		e.state.Stage = StageShowdown
 		e.determineWinners()
+		// 标记为提前结束
+		if e.state.LastShowdown != nil {
+			e.state.LastShowdown.IsEarlyEnd = true
+		}
 		e.notifyStateChange()
 		return nil
 	}
@@ -681,8 +708,20 @@ func (e *GameEngine) nextPlayer() {
 
 // advanceBettingRound 进入下一轮下注
 func (e *GameEngine) advanceBettingRound() {
-	// 在进入下一轮之前，收集本轮的边池
-	e.collectSidePots()
+	// 检查是否有全下玩家，只在有全下时才创建边池
+	hasAllIn := false
+	for _, p := range e.state.Players {
+		if p.Status == models.PlayerStatusAllIn {
+			hasAllIn = true
+			break
+		}
+	}
+
+	if hasAllIn {
+		// 有全下玩家时，收集本轮的边池（用于精确计算每人可赢的金额）
+		e.collectSidePots()
+		log.Printf("[引擎] 收集边池 | 当前边池数=%d", len(e.state.SidePots))
+	}
 
 	// 重置所有玩家的行动状态和当前下注
 	for _, p := range e.state.Players {
@@ -845,7 +884,8 @@ func (e *GameEngine) findFirstToActPreflop() int {
 
 // determineWinners 判定获胜者并分配底池（支持边池结算）
 func (e *GameEngine) determineWinners() {
-	log.Printf("[引擎] ====== 开始结算 | 底池=%d | 边池数=%d ======", e.state.Pot, len(e.state.SidePots))
+	totalPot := e.state.Pot
+	log.Printf("[引擎] ====== 开始结算 | 底池=%d | 边池数=%d ======", totalPot, len(e.state.SidePots))
 
 	// 打印公共牌
 	var ccards []string
@@ -856,18 +896,59 @@ func (e *GameEngine) determineWinners() {
 	}
 	log.Printf("[引擎] 公共牌: [%s]", strings.Join(ccards, " "))
 
+	// 初始化结算结果：记录每位玩家的结算前筹码
+	result := &ShowdownResult{
+		TotalPot:   totalPot,
+		IsEarlyEnd: false,
+	}
+	chipsBefore := make(map[int]int)
+	for i, p := range e.state.Players {
+		chipsBefore[i] = p.Chips
+	}
+
 	// 如果有边池，按边池依次结算
 	if len(e.state.SidePots) > 0 {
 		log.Printf("[引擎] 使用边池结算模式")
 		e.determineWinnersWithSidePots()
-		return
+	} else {
+		// 没有边池时，使用标准结算逻辑
+		log.Printf("[引擎] 使用标准结算模式")
+		e.determineWinnersStandard()
 	}
 
-	// 没有边池时，使用原有逻辑
-	log.Printf("[引擎] 使用标准结算模式")
+	// 构建结算结果明细
+	for i, p := range e.state.Players {
+		pr := PlayerResult{
+			PlayerIdx:   i,
+			PlayerName:  p.Name,
+			HoleCards:   p.HoleCards,
+			IsFolded:    p.Status == models.PlayerStatusFolded,
+			ChipsBefore: chipsBefore[i],
+			ChipsAfter:  p.Chips,
+			WonAmount:   p.Chips - chipsBefore[i],
+			IsWinner:    p.Chips > chipsBefore[i],
+		}
+
+		// 对未弃牌的玩家评估牌型
+		if !pr.IsFolded && p.HoleCards[0].Rank != 0 && len(ccards) > 0 {
+			eval := e.evaluator.Evaluate(p.HoleCards, e.state.CommunityCards)
+			pr.HandRank = eval.Rank
+			pr.HandName = eval.Rank.String()
+			pr.BestCards = eval.RawCards
+		}
+
+		result.Players = append(result.Players, pr)
+	}
+
+	e.state.LastShowdown = result
+	log.Printf("[引擎] ====== 结算完成 ======")
+}
+
+// determineWinnersStandard 标准结算逻辑（无边池）
+func (e *GameEngine) determineWinnersStandard() {
 	var bestEval evaluator.HandEvaluation
 	var bestPlayerIdx int = -1
-	ties := []int{} // 平局玩家列表
+	ties := []int{}
 
 	for i, p := range e.state.Players {
 		if p.Status == models.PlayerStatusActive || p.Status == models.PlayerStatusAllIn {
@@ -892,7 +973,6 @@ func (e *GameEngine) determineWinners() {
 
 	// 分配底池
 	if len(ties) > 0 {
-		// 平分底池
 		share := e.state.Pot / len(ties)
 		remainder := e.state.Pot % len(ties)
 		var tieNames []string
@@ -906,7 +986,6 @@ func (e *GameEngine) determineWinners() {
 		}
 		log.Printf("[引擎] 平局! | 玩家=%s | 每人分得=%d", strings.Join(tieNames, ", "), share)
 	} else if bestPlayerIdx >= 0 {
-		// 单人获胜
 		winner := e.state.Players[bestPlayerIdx]
 		log.Printf("[引擎] 获胜者=%s | 牌型=%s | 赢得底池=%d | 筹码: %d→%d",
 			winner.Name, bestEval.Rank, e.state.Pot, winner.Chips, winner.Chips+e.state.Pot)
@@ -914,7 +993,6 @@ func (e *GameEngine) determineWinners() {
 	}
 
 	e.state.Pot = 0
-	log.Printf("[引擎] ====== 结算完成 ======")
 }
 
 // determineWinnersWithSidePots 使用边池结算判定获胜者

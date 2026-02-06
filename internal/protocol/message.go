@@ -149,19 +149,32 @@ type PlayerActed struct {
 // Showdown 摊牌结果
 type Showdown struct {
 	BaseMessage
-	Winners   []WinnerInfo `json:"winners"`    // 获胜者列表
-	Pot       int          `json:"pot"`        // 底池金额
-	GameState *GameState  `json:"game_state"` // 最终游戏状态
+	Winners        []WinnerInfo           `json:"winners"`         // 获胜者列表
+	Pot            int                    `json:"pot"`             // 底池金额
+	IsEarlyEnd     bool                   `json:"is_early_end"`   // 是否提前结束（其他人全弃牌）
+	AllPlayers     []ShowdownPlayerDetail `json:"all_players"`    // 所有玩家的结算详情
+	CommunityCards [5]card.Card           `json:"community_cards"` // 公共牌
 }
 
 // WinnerInfo 获胜者信息
 type WinnerInfo struct {
-	PlayerID   string                 `json:"player_id"`   // 玩家ID
-	PlayerName string                 `json:"player_name"` // 玩家名称
-	HandRank   evaluator.HandRank    `json:"hand_rank"`   // 手牌等级
-	HandName   string                `json:"hand_name"`   // 手牌名称
-	WonChips   int                   `json:"won_chips"`   // 赢得筹码
-	RawCards   []card.Card           `json:"raw_cards"`   // 构成最佳手牌的牌
+	PlayerID   string              `json:"player_id"`   // 玩家ID
+	PlayerName string              `json:"player_name"` // 玩家名称
+	HandRank   evaluator.HandRank  `json:"hand_rank"`   // 手牌等级
+	HandName   string              `json:"hand_name"`   // 手牌名称
+	WonChips   int                 `json:"won_chips"`   // 赢得筹码
+	RawCards   []card.Card         `json:"raw_cards"`   // 构成最佳手牌的牌
+}
+
+// ShowdownPlayerDetail 摊牌时每位玩家的详细结算信息
+type ShowdownPlayerDetail struct {
+	PlayerName string       `json:"player_name"` // 玩家名称
+	HoleCards  [2]card.Card `json:"hole_cards"`  // 底牌
+	HandName   string       `json:"hand_name"`   // 牌型名称（弃牌玩家为空）
+	WonAmount  int          `json:"won_amount"`  // 赢得/输掉的筹码（负数表示输）
+	IsWinner   bool         `json:"is_winner"`   // 是否赢家
+	IsFolded   bool         `json:"is_folded"`   // 是否已弃牌
+	ChipsAfter int          `json:"chips_after"` // 结算后筹码
 }
 
 // ChatMessage 聊天消息

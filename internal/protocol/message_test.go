@@ -212,11 +212,6 @@ func TestShowdown(t *testing.T) {
 			},
 		},
 		Pot: 500,
-		GameState: &GameState{
-			GameID: "game123",
-			Stage: game.StageShowdown,
-			Pot:   500,
-		},
 	}
 
 	if len(showdown.Winners) != 1 {

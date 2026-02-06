@@ -6,7 +6,7 @@ import (
 	"github.com/wilenwang/just_play/Texas-Holdem/internal/card"
 )
 
-// HandRank 表示手牌的牌型等级（数字越小牌型越大）
+// HandRank 表示手牌的牌型等级（数字越大牌型越强：HighCard=1 < OnePair=2 < ... < RoyalFlush=10）
 type HandRank int
 
 const (
@@ -426,12 +426,13 @@ func (e *Evaluator) checkHighCard(sorted []card.Card) HandEvaluation {
 
 // Compare 比较两手牌
 // 返回 1 表示 h1 赢，-1 表示 h2 赢，0 表示平局
+// Rank 数值越大牌型越强（HighCard=1 < OnePair=2 < ... < RoyalFlush=10）
 func (e *Evaluator) Compare(h1, h2 HandEvaluation) int {
 	if h1.Rank != h2.Rank {
 		if h1.Rank > h2.Rank {
-			return -1 // 数字越小牌型越大
+			return 1 // 数字越大牌型越强
 		}
-		return 1
+		return -1
 	}
 	if h1.MainValue != h2.MainValue {
 		if h1.MainValue > h2.MainValue {

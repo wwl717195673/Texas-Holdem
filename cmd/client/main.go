@@ -442,22 +442,82 @@ func formatCard(c card.Card) string {
 	return fmt.Sprintf("%s%s", rankSymbols[c.Rank], suitSymbols[c.Suit])
 }
 
-// displayShowdown 显示摊牌结果
+// displayShowdown 显示摊牌结算详情
 func displayShowdown(showdown *protocol.Showdown) {
 	fmt.Println()
-	fmt.Println("╔════════════════════════════════════════╗")
-	fmt.Println("║            摊牌结果                  ║")
-	fmt.Println("╠════════════════════════════════════════╣")
+	fmt.Println("╔══════════════════════════════════════════════════════╗")
+	if showdown.IsEarlyEnd {
+		fmt.Println("║                  本局结算（提前结束）                ║")
+	} else {
+		fmt.Println("║                     本局结算                        ║")
+	}
+	fmt.Println("╠══════════════════════════════════════════════════════╣")
 
-	for _, winner := range showdown.Winners {
-		fmt.Printf("║  %-10s: %-20s    ║\n", winner.PlayerName, winner.HandName)
-		fmt.Printf("║               赢得: %d 筹码              ║\n", winner.WonChips)
-		fmt.Print("║               手牌: ")
-		for _, c := range winner.RawCards {
+	// 显示公共牌
+	fmt.Print("║  公共牌: ")
+	hasCards := false
+	for _, c := range showdown.CommunityCards {
+		if c.Rank != 0 {
 			fmt.Printf("%s ", formatCard(c))
+			hasCards = true
 		}
-		fmt.Println("             ║")
+	}
+	if !hasCards {
+		fmt.Print("(无)")
+	}
+	fmt.Println()
+
+	// 显示底池
+	fmt.Printf("║  总底池: %d\n", showdown.Pot)
+	fmt.Println("╠══════════════════════════════════════════════════════╣")
+
+	// 显示每位玩家的结算详情
+	for _, p := range showdown.AllPlayers {
+		// 赢家用 ★ 标记
+		marker := " "
+		if p.IsWinner {
+			marker = "★"
+		}
+
+		if p.IsFolded {
+			// 弃牌玩家
+			fmt.Printf("║ %s %-8s  [已弃牌]                                 \n", marker, p.PlayerName)
+		} else {
+			// 未弃牌玩家：显示底牌和牌型
+			card1 := formatCard(p.HoleCards[0])
+			card2 := formatCard(p.HoleCards[1])
+			handName := p.HandName
+			if handName == "" {
+				handName = "-"
+			}
+			fmt.Printf("║ %s %-8s  底牌: %s %s  牌型: %s\n",
+				marker, p.PlayerName, card1, card2, handName)
+		}
+
+		// 显示筹码变化
+		if p.WonAmount > 0 {
+			fmt.Printf("║            赢得 +%d 筹码  (剩余: %d)\n", p.WonAmount, p.ChipsAfter)
+		} else if p.WonAmount < 0 {
+			fmt.Printf("║            输掉 %d 筹码  (剩余: %d)\n", p.WonAmount, p.ChipsAfter)
+		} else {
+			fmt.Printf("║            筹码不变  (剩余: %d)\n", p.ChipsAfter)
+		}
 	}
 
-	fmt.Println("╚════════════════════════════════════════╝")
+	fmt.Println("╠══════════════════════════════════════════════════════╣")
+
+	// 醒目显示赢家
+	for _, w := range showdown.Winners {
+		if showdown.IsEarlyEnd {
+			fmt.Printf("║  ★ %s 获胜（其他玩家全部弃牌） +%d 筹码\n", w.PlayerName, w.WonChips)
+		} else {
+			handName := w.HandName
+			if handName == "" {
+				handName = "高牌"
+			}
+			fmt.Printf("║  ★ %s 以 [%s] 获胜  +%d 筹码\n", w.PlayerName, handName, w.WonChips)
+		}
+	}
+
+	fmt.Println("╚══════════════════════════════════════════════════════╝")
 }

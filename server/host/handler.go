@@ -171,6 +171,10 @@ func (s *Server) handlePlayerAction(client *Client, data []byte) {
 	if afterState.Stage == gamepkg.StageEnd || afterState.Stage == gamepkg.StageShowdown {
 		log.Printf("[状态机] 本局结束 | 阶段=%s | 底池=%d", afterState.Stage, afterState.Pot)
 		s.logFinalResult(afterState)
+
+		// 广播结算详情给所有玩家
+		s.broadcastShowdownResult(afterState)
+
 		log.Printf("[状态机] 3秒后自动开始下一局...")
 		go func() {
 			time.Sleep(3 * time.Second)
@@ -185,11 +189,12 @@ func (s *Server) handlePlayerAction(client *Client, data []byte) {
 		minAction := s.getMinAction(nextPlayer.ID)
 		maxAction := s.getMaxAction(nextPlayer.ID)
 
-		log.Printf("[轮转] 下一个行动 | 玩家=%s(idx=%d) | 筹码=%d | 已下注=%d | 需补=%d | 最大=%d",
-			nextPlayer.Name, afterState.CurrentPlayer, nextPlayer.Chips, nextPlayer.CurrentBet, minAction, maxAction)
+		stageChanged := beforeState.Stage != afterState.Stage
+		log.Printf("[轮转] 下一个行动 | 玩家=%s(idx=%d) | 筹码=%d | 已下注=%d | 需补=%d | 最大=%d | 换轮=%v",
+			nextPlayer.Name, afterState.CurrentPlayer, nextPlayer.Chips, nextPlayer.CurrentBet, minAction, maxAction, stageChanged)
 
-		// 如果是新玩家的回合，发送通知
-		if nextPlayer.ID != client.ID {
+		// 发送行动通知：换轮时无论是否同一人都要通知，同一轮内只通知不同玩家
+		if stageChanged || nextPlayer.ID != client.ID {
 			turnMsg := &protocol.YourTurn{
 				BaseMessage: protocol.NewBaseMessage(protocol.MsgTypeYourTurn),
 				PlayerID:    nextPlayer.ID,
@@ -335,6 +340,64 @@ func (s *Server) tryAutoStartHand() {
 		}
 		s.sendToClient(nextPlayer.ID, turnMsg)
 	}
+}
+
+// broadcastShowdownResult 广播结算结果给所有客户端
+func (s *Server) broadcastShowdownResult(state *gamepkg.GameState) {
+	if state.LastShowdown == nil {
+		log.Printf("[结算广播] 无结算数据，跳过")
+		return
+	}
+
+	sd := state.LastShowdown
+
+	// 构建获胜者列表
+	var winners []protocol.WinnerInfo
+	for _, pr := range sd.Players {
+		if pr.IsWinner {
+			winners = append(winners, protocol.WinnerInfo{
+				PlayerID:   state.Players[pr.PlayerIdx].ID,
+				PlayerName: pr.PlayerName,
+				HandRank:   pr.HandRank,
+				HandName:   pr.HandName,
+				WonChips:   pr.WonAmount,
+				RawCards:   pr.BestCards,
+			})
+		}
+	}
+
+	// 构建摊牌消息（包含所有玩家详情，方便客户端展示）
+	showdownMsg := &protocol.Showdown{
+		BaseMessage: protocol.NewBaseMessage(protocol.MsgTypeShowdown),
+		Winners:     winners,
+		Pot:         sd.TotalPot,
+		IsEarlyEnd:  sd.IsEarlyEnd,
+		AllPlayers:  make([]protocol.ShowdownPlayerDetail, 0, len(sd.Players)),
+		CommunityCards: state.CommunityCards,
+	}
+
+	for _, pr := range sd.Players {
+		detail := protocol.ShowdownPlayerDetail{
+			PlayerName:  pr.PlayerName,
+			HoleCards:   pr.HoleCards,
+			HandName:    pr.HandName,
+			WonAmount:   pr.WonAmount,
+			IsWinner:    pr.IsWinner,
+			IsFolded:    pr.IsFolded,
+			ChipsAfter:  pr.ChipsAfter,
+		}
+		showdownMsg.AllPlayers = append(showdownMsg.AllPlayers, detail)
+	}
+
+	data, err := json.Marshal(showdownMsg)
+	if err != nil {
+		log.Printf("[结算广播] 序列化失败: %v", err)
+		return
+	}
+
+	log.Printf("[结算广播] 广播结算结果 | 总底池=%d | 赢家数=%d | 提前结束=%v",
+		sd.TotalPot, len(winners), sd.IsEarlyEnd)
+	s.broadcast <- data
 }
 
 // ==================== 日志辅助方法 ====================

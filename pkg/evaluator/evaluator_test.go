@@ -263,20 +263,22 @@ func TestEvaluator_HighCard(t *testing.T) {
 func TestEvaluator_Compare(t *testing.T) {
 	e := NewEvaluator()
 
-	// Player 1: Pair of Aces (no straight possible with community)
-	hole1 := [2]card.Card{
-		{card.Hearts, card.Ace},
-		{card.Diamonds, card.Ace},
-	}
+	// 公共牌不包含 A 和 K，确保玩家只有各自的一对
 	community := [5]card.Card{
-		{card.Clubs, card.King},
+		{card.Clubs, card.Ten},
 		{card.Spades, card.Queen},
 		{card.Hearts, card.Jack},
 		{card.Diamonds, card.Eight},
 		{card.Clubs, card.Two},
 	}
 
-	// Player 2: Pair of Kings
+	// 玩家1: 一对 A（最大的一对）
+	hole1 := [2]card.Card{
+		{card.Hearts, card.Ace},
+		{card.Diamonds, card.Ace},
+	}
+
+	// 玩家2: 一对 K
 	hole2 := [2]card.Card{
 		{card.Hearts, card.King},
 		{card.Diamonds, card.King},
@@ -285,9 +287,24 @@ func TestEvaluator_Compare(t *testing.T) {
 	eval1 := e.Evaluate(hole1, community)
 	eval2 := e.Evaluate(hole2, community)
 
+	// 一对 A 应该赢一对 K
 	cmp := e.Compare(eval1, eval2)
 	if cmp != 1 {
-		t.Error("Player 1 with pair of Aces should win")
+		t.Errorf("一对A应该赢一对K, 实际结果: cmp=%d, eval1=%s(%d), eval2=%s(%d)",
+			cmp, eval1.Rank, eval1.MainValue, eval2.Rank, eval2.MainValue)
+	}
+
+	// 额外测试：两对 应该赢 一对
+	hole3 := [2]card.Card{
+		{card.Hearts, card.Ten},   // 和公共牌的 10♣ 组成一对 10
+		{card.Diamonds, card.Two}, // 和公共牌的 2♣ 组成一对 2
+	}
+	eval3 := e.Evaluate(hole3, community)
+
+	cmp2 := e.Compare(eval3, eval2)
+	if cmp2 != 1 {
+		t.Errorf("两对应该赢一对, 实际结果: cmp=%d, eval3=%s(%d), eval2=%s(%d)",
+			cmp2, eval3.Rank, eval3.MainValue, eval2.Rank, eval2.MainValue)
 	}
 }
 
