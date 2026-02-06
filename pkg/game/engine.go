@@ -3,7 +3,9 @@ package game
 import (
 	"errors"
 	"fmt"
+	"log"
 	"math/rand"
+	"strings"
 	"sync"
 	"time"
 
@@ -180,12 +182,17 @@ func (e *GameEngine) StartHand() error {
 	e.mutex.Lock()
 	defer e.mutex.Unlock()
 
-	if e.state.Stage != StageWaiting {
+	log.Printf("[引擎] StartHand 开始 | 当前阶段=%s", e.state.Stage)
+
+	// 允许从等待、摊牌、局结束状态开始新的一局
+	if e.state.Stage != StageWaiting && e.state.Stage != StageShowdown && e.state.Stage != StageEnd {
+		log.Printf("[引擎] StartHand 拒绝 | 当前阶段=%s 不允许开始新局", e.state.Stage)
 		return ErrHandInProgress
 	}
 
 	activePlayers := e.getActivePlayers()
 	if len(activePlayers) < 2 {
+		log.Printf("[引擎] StartHand 拒绝 | 活跃玩家不足(需要>=2, 当前=%d)", len(activePlayers))
 		return ErrNotEnoughPlayers
 	}
 
@@ -196,22 +203,27 @@ func (e *GameEngine) StartHand() error {
 	e.state.Pot = 0
 	e.state.SidePots = make([]SidePot, 0)
 
-	// 洗牌
-	e.deck = card.NewDeck()
-	e.deck.Shuffle()
-
-	// 轮转庄家按钮
-	e.rotateDealerButton()
-
-	// 重置玩家状态
+	// 先重置玩家状态（必须在轮转庄家按钮之前，否则弃牌玩家会被跳过）
 	for _, p := range e.state.Players {
 		p.HoleCards = [2]card.Card{}
 		p.CurrentBet = 0
 		p.HasActed = false
-		if p.Chips <= 0 {
+		if p.Chips > 0 {
+			p.Status = models.PlayerStatusActive
+		} else {
 			p.Status = models.PlayerStatusFolded
+			log.Printf("[引擎] 玩家 %s 筹码为0，标记为弃牌", p.Name)
 		}
 	}
+
+	// 洗牌
+	e.deck = card.NewDeck()
+	e.deck.Shuffle()
+	log.Printf("[引擎] 洗牌完成")
+
+	// 轮转庄家按钮
+	e.rotateDealerButton()
+	log.Printf("[引擎] 庄家按钮 → 座位%d (%s)", e.state.Players[e.state.DealerButton].Seat, e.state.Players[e.state.DealerButton].Name)
 
 	// 扣除前注（如果有配置）
 	e.collectAnte()
@@ -221,6 +233,17 @@ func (e *GameEngine) StartHand() error {
 
 	// 发底牌
 	e.dealHoleCards()
+	for _, p := range e.state.Players {
+		if p.Status == models.PlayerStatusActive {
+			log.Printf("[引擎] 发牌 | %s → [%s %s]", p.Name, p.HoleCards[0], p.HoleCards[1])
+		}
+	}
+
+	// 设置翻牌前第一个行动玩家（大盲之后的玩家，2人局为小盲/庄家）
+	e.state.CurrentPlayer = e.findFirstToActPreflop()
+	log.Printf("[引擎] 翻牌前第一个行动 → %s(idx=%d)", e.state.Players[e.state.CurrentPlayer].Name, e.state.CurrentPlayer)
+
+	log.Printf("[引擎] StartHand 完成 | 底池=%d | 当前下注=%d", e.state.Pot, e.state.CurrentBet)
 
 	e.notifyStateChange()
 	return nil
@@ -230,6 +253,13 @@ func (e *GameEngine) StartHand() error {
 func (e *GameEngine) PlayerAction(playerID string, action models.ActionType, amount int) error {
 	e.mutex.Lock()
 	defer e.mutex.Unlock()
+
+	// 检查游戏是否处于下注阶段（只有翻牌前、翻牌、转牌、河牌可以行动）
+	if e.state.Stage != StagePreFlop && e.state.Stage != StageFlop &&
+		e.state.Stage != StageTurn && e.state.Stage != StageRiver {
+		log.Printf("[引擎] PlayerAction 拒绝 | 当前阶段=%s 不是下注阶段", e.state.Stage)
+		return ErrNotYourTurn
+	}
 
 	player := e.getPlayerByID(playerID)
 	if player == nil {
@@ -249,6 +279,9 @@ func (e *GameEngine) PlayerAction(playerID string, action models.ActionType, amo
 	if err := e.validateAction(player, action, amount); err != nil {
 		return err
 	}
+
+	// 记录加注/全下前的最高下注，用于判断是否需要重置其他玩家的行动状态
+	prevBet := e.state.CurrentBet
 
 	// 执行动作
 	switch action {
@@ -284,6 +317,20 @@ func (e *GameEngine) PlayerAction(playerID string, action models.ActionType, amo
 
 	player.HasActed = true
 
+	// 如果下注金额提高了（加注或全下加注），重置其他活跃玩家的行动状态，让他们有机会响应
+	if e.state.CurrentBet > prevBet {
+		var resetNames []string
+		for _, p := range e.state.Players {
+			if p.ID != playerID && p.Status == models.PlayerStatusActive {
+				p.HasActed = false
+				resetNames = append(resetNames, p.Name)
+			}
+		}
+		if len(resetNames) > 0 {
+			log.Printf("[引擎] 下注提高 %d→%d | 重置行动状态: %s", prevBet, e.state.CurrentBet, strings.Join(resetNames, ", "))
+		}
+	}
+
 	// 记录动作
 	e.state.Actions = append(e.state.Actions, models.PlayerAction{
 		PlayerID: playerID,
@@ -291,7 +338,7 @@ func (e *GameEngine) PlayerAction(playerID string, action models.ActionType, amo
 		Amount:   player.CurrentBet,
 	})
 
-	// 检查是否只剩一名未弃牌玩家（提前结束判定）
+	// 检查是否只剩一名未弃牌玩家（提前结束判定：所有其他人都弃牌了）
 	if e.checkEarlyFinish() {
 		e.state.Stage = StageShowdown
 		e.determineWinners()
@@ -313,14 +360,22 @@ func (e *GameEngine) PlayerAction(playerID string, action models.ActionType, amo
 // ==================== 私有方法 ====================
 
 // checkEarlyFinish 检查是否只剩一名未弃牌玩家，可以提前结束
-// 如果只剩一名活跃玩家，该玩家直接获胜
+// 未弃牌 = Active + AllIn，只有当仅剩1人时才提前结束（其他人全弃牌了）
 func (e *GameEngine) checkEarlyFinish() bool {
-	activePlayers := e.getActivePlayers()
-	if len(activePlayers) == 1 {
-		// 只剩一名活跃玩家，直接获胜
+	nonFolded := 0
+	var nonFoldedNames []string
+	for _, p := range e.state.Players {
+		if p.Status == models.PlayerStatusActive || p.Status == models.PlayerStatusAllIn {
+			nonFolded++
+			nonFoldedNames = append(nonFoldedNames, fmt.Sprintf("%s(%s)", p.Name, p.Status))
+		}
+	}
+	if nonFolded <= 1 {
+		log.Printf("[引擎] 提前结束判定=是 | 未弃牌玩家=%d | 名单=%s", nonFolded, strings.Join(nonFoldedNames, ", "))
 		e.state.Stage = StageShowdown
 		return true
 	}
+	log.Printf("[引擎] 提前结束判定=否 | 未弃牌玩家=%d", nonFolded)
 	return false
 }
 
@@ -497,19 +552,34 @@ func (e *GameEngine) rotateDealerButton() {
 }
 
 // collectBlinds 扣除盲注（会在前注之后执行）
+// 2人局特殊规则：庄家=小盲，非庄家=大盲
+// 3人及以上：庄家下一位=小盲，再下一位=大盲
 func (e *GameEngine) collectBlinds() {
 	dealerIdx := e.state.DealerButton
 	sbIdx, bbIdx := -1, -1
+	activePlayers := e.getActivePlayers()
 
-	// 找到小盲和大盲位置
-	for i := 1; i <= len(e.state.Players); i++ {
-		idx := (dealerIdx + i) % len(e.state.Players)
-		if e.state.Players[idx].Status == models.PlayerStatusActive {
-			if sbIdx < 0 {
-				sbIdx = idx
-			} else {
+	if len(activePlayers) == 2 {
+		// 2人局（Heads-up）：庄家发小盲，对手发大盲
+		sbIdx = dealerIdx
+		for i := 1; i <= len(e.state.Players); i++ {
+			idx := (dealerIdx + i) % len(e.state.Players)
+			if e.state.Players[idx].Status == models.PlayerStatusActive {
 				bbIdx = idx
 				break
+			}
+		}
+	} else {
+		// 3人及以上：庄家下一位为小盲，再下一位为大盲
+		for i := 1; i <= len(e.state.Players); i++ {
+			idx := (dealerIdx + i) % len(e.state.Players)
+			if e.state.Players[idx].Status == models.PlayerStatusActive {
+				if sbIdx < 0 {
+					sbIdx = idx
+				} else {
+					bbIdx = idx
+					break
+				}
 			}
 		}
 	}
@@ -521,6 +591,7 @@ func (e *GameEngine) collectBlinds() {
 		sb.Chips -= sbAmount
 		sb.CurrentBet = sbAmount
 		e.state.Pot += sbAmount
+		log.Printf("[引擎] 小盲 | %s(座位%d) 下注%d | 剩余筹码=%d", sb.Name, sb.Seat, sbAmount, sb.Chips)
 	}
 
 	// 扣除大盲
@@ -531,6 +602,7 @@ func (e *GameEngine) collectBlinds() {
 		bb.CurrentBet = bbAmount
 		e.state.Pot += bbAmount
 		e.state.CurrentBet = bbAmount
+		log.Printf("[引擎] 大盲 | %s(座位%d) 下注%d | 剩余筹码=%d | 底池=%d", bb.Name, bb.Seat, bbAmount, bb.Chips, e.state.Pot)
 	}
 }
 
@@ -591,7 +663,9 @@ func (e *GameEngine) isBettingRoundComplete() bool {
 		}
 	}
 
-	return actedPlayers >= activePlayers
+	complete := actedPlayers >= activePlayers
+	log.Printf("[引擎] 下注轮完成检查 | 活跃=%d | 已行动=%d | 完成=%v", activePlayers, actedPlayers, complete)
+	return complete
 }
 
 // nextPlayer 轮到下一位玩家
@@ -610,11 +684,28 @@ func (e *GameEngine) advanceBettingRound() {
 	// 在进入下一轮之前，收集本轮的边池
 	e.collectSidePots()
 
-	// 重置所有玩家的行动状态
+	// 重置所有玩家的行动状态和当前下注
 	for _, p := range e.state.Players {
 		p.HasActed = false
+		p.CurrentBet = 0
 	}
 	e.state.CurrentBet = 0
+
+	// 检查是否还有活跃玩家可以行动（如果全员全下或弃牌，直接发完剩余牌摊牌）
+	activeCanAct := false
+	for _, p := range e.state.Players {
+		if p.Status == models.PlayerStatusActive {
+			activeCanAct = true
+			break
+		}
+	}
+
+	if !activeCanAct {
+		// 没有活跃玩家可以行动（全员全下），直接发完剩余公共牌并摊牌
+		log.Printf("[引擎] 无活跃玩家可行动（全员全下或弃牌），跳到摊牌")
+		e.dealRemainingAndShowdown()
+		return
+	}
 
 	switch e.state.Stage {
 	case StagePreFlop:
@@ -624,6 +715,8 @@ func (e *GameEngine) advanceBettingRound() {
 		flop, _ := e.deck.DealN(3)
 		e.state.CommunityCards = [5]card.Card{flop[0], flop[1], flop[2]}
 		e.state.CurrentPlayer = e.findFirstToAct()
+		log.Printf("[引擎] 阶段推进 → 翻牌 | 公共牌=[%s %s %s] | 首位行动=%s(idx=%d)",
+			flop[0], flop[1], flop[2], e.state.Players[e.state.CurrentPlayer].Name, e.state.CurrentPlayer)
 
 	case StageFlop:
 		// 转牌：发第4张公共牌
@@ -632,6 +725,8 @@ func (e *GameEngine) advanceBettingRound() {
 		turn, _ := e.deck.DealN(1)
 		e.state.CommunityCards[3] = turn[0]
 		e.state.CurrentPlayer = e.findFirstToAct()
+		log.Printf("[引擎] 阶段推进 → 转牌 | 第4张=%s | 首位行动=%s(idx=%d)",
+			turn[0], e.state.Players[e.state.CurrentPlayer].Name, e.state.CurrentPlayer)
 
 	case StageTurn:
 		// 河牌：发第5张公共牌
@@ -640,15 +735,57 @@ func (e *GameEngine) advanceBettingRound() {
 		river, _ := e.deck.DealN(1)
 		e.state.CommunityCards[4] = river[0]
 		e.state.CurrentPlayer = e.findFirstToAct()
+		log.Printf("[引擎] 阶段推进 → 河牌 | 第5张=%s | 首位行动=%s(idx=%d)",
+			river[0], e.state.Players[e.state.CurrentPlayer].Name, e.state.CurrentPlayer)
 
 	case StageRiver:
 		// 河牌结束，进入摊牌
+		log.Printf("[引擎] 阶段推进 → 摊牌")
 		e.state.Stage = StageShowdown
 		e.determineWinners()
 	}
 }
 
-// findFirstToAct 找到庄家后第一位需要行动的玩家
+// dealRemainingAndShowdown 全员全下时，发完剩余公共牌并直接摊牌
+func (e *GameEngine) dealRemainingAndShowdown() {
+	log.Printf("[引擎] dealRemainingAndShowdown | 从阶段=%s 快进到摊牌", e.state.Stage)
+	switch e.state.Stage {
+	case StagePreFlop:
+		// 发翻牌（3张）+ 转牌 + 河牌
+		e.deck.Burn(1)
+		flop, _ := e.deck.DealN(3)
+		e.state.CommunityCards = [5]card.Card{flop[0], flop[1], flop[2]}
+		e.deck.Burn(1)
+		turn, _ := e.deck.DealN(1)
+		e.state.CommunityCards[3] = turn[0]
+		e.deck.Burn(1)
+		river, _ := e.deck.DealN(1)
+		e.state.CommunityCards[4] = river[0]
+
+	case StageFlop:
+		// 发转牌 + 河牌
+		e.deck.Burn(1)
+		turn, _ := e.deck.DealN(1)
+		e.state.CommunityCards[3] = turn[0]
+		e.deck.Burn(1)
+		river, _ := e.deck.DealN(1)
+		e.state.CommunityCards[4] = river[0]
+
+	case StageTurn:
+		// 发河牌
+		e.deck.Burn(1)
+		river, _ := e.deck.DealN(1)
+		e.state.CommunityCards[4] = river[0]
+
+	case StageRiver:
+		// 已在河牌，无需发牌
+	}
+
+	e.state.Stage = StageShowdown
+	e.determineWinners()
+}
+
+// findFirstToAct 找到庄家后第一位需要行动的玩家（翻牌后使用）
 func (e *GameEngine) findFirstToAct() int {
 	for i := 1; i <= len(e.state.Players); i++ {
 		idx := (e.state.DealerButton + i) % len(e.state.Players)
@@ -659,22 +796,84 @@ func (e *GameEngine) findFirstToAct() int {
 	return 0
 }
 
+// findFirstToActPreflop 翻牌前找到第一位行动玩家
+// 规则：大盲后面的第一位活跃玩家（UTG）
+// 2人局特殊规则：小盲（庄家）先行动
+func (e *GameEngine) findFirstToActPreflop() int {
+	dealerIdx := e.state.DealerButton
+	activePlayers := e.getActivePlayers()
+
+	// 找到大盲位置
+	bbIdx := -1
+	if len(activePlayers) == 2 {
+		// 2人局：大盲是庄家对面的玩家
+		for i := 1; i <= len(e.state.Players); i++ {
+			idx := (dealerIdx + i) % len(e.state.Players)
+			if e.state.Players[idx].Status == models.PlayerStatusActive {
+				bbIdx = idx
+				break
+			}
+		}
+	} else {
+		// 3人及以上：大盲是庄家后第二位活跃玩家
+		count := 0
+		for i := 1; i <= len(e.state.Players); i++ {
+			idx := (dealerIdx + i) % len(e.state.Players)
+			if e.state.Players[idx].Status == models.PlayerStatusActive {
+				count++
+				if count == 2 {
+					bbIdx = idx
+					break
+				}
+			}
+		}
+	}
+
+	if bbIdx < 0 {
+		return e.findFirstToAct()
+	}
+
+	// 大盲之后的第一位活跃玩家为 UTG（2人局则回到庄家/小盲）
+	for i := 1; i <= len(e.state.Players); i++ {
+		idx := (bbIdx + i) % len(e.state.Players)
+		if e.state.Players[idx].Status == models.PlayerStatusActive {
+			return idx
+		}
+	}
+	return 0
+}
+
 // determineWinners 判定获胜者并分配底池（支持边池结算）
 func (e *GameEngine) determineWinners() {
+	log.Printf("[引擎] ====== 开始结算 | 底池=%d | 边池数=%d ======", e.state.Pot, len(e.state.SidePots))
+
+	// 打印公共牌
+	var ccards []string
+	for _, c := range e.state.CommunityCards {
+		if c.Rank != 0 {
+			ccards = append(ccards, c.String())
+		}
+	}
+	log.Printf("[引擎] 公共牌: [%s]", strings.Join(ccards, " "))
+
 	// 如果有边池，按边池依次结算
 	if len(e.state.SidePots) > 0 {
+		log.Printf("[引擎] 使用边池结算模式")
 		e.determineWinnersWithSidePots()
 		return
 	}
 
 	// 没有边池时，使用原有逻辑
+	log.Printf("[引擎] 使用标准结算模式")
 	var bestEval evaluator.HandEvaluation
 	var bestPlayerIdx int = -1
 	ties := []int{} // 平局玩家列表
 
 	for i, p := range e.state.Players {
-		if p.Status == models.PlayerStatusActive {
+		if p.Status == models.PlayerStatusActive || p.Status == models.PlayerStatusAllIn {
 			eval := e.evaluator.Evaluate(p.HoleCards, e.state.CommunityCards)
+			log.Printf("[引擎] 评估手牌 | %s | 底牌=[%s %s] | 牌型=%s | 主值=%d",
+				p.Name, p.HoleCards[0], p.HoleCards[1], eval.Rank, eval.MainValue)
 			if bestPlayerIdx < 0 {
 				bestEval = eval
 				bestPlayerIdx = i
@@ -696,19 +895,26 @@ func (e *GameEngine) determineWinners() {
 		// 平分底池
 		share := e.state.Pot / len(ties)
 		remainder := e.state.Pot % len(ties)
+		var tieNames []string
 		for _, idx := range ties {
 			e.state.Players[idx].Chips += share
 			if remainder > 0 {
 				e.state.Players[idx].Chips++
 				remainder--
 			}
+			tieNames = append(tieNames, e.state.Players[idx].Name)
 		}
+		log.Printf("[引擎] 平局! | 玩家=%s | 每人分得=%d", strings.Join(tieNames, ", "), share)
 	} else if bestPlayerIdx >= 0 {
 		// 单人获胜
-		e.state.Players[bestPlayerIdx].Chips += e.state.Pot
+		winner := e.state.Players[bestPlayerIdx]
+		log.Printf("[引擎] 获胜者=%s | 牌型=%s | 赢得底池=%d | 筹码: %d→%d",
+			winner.Name, bestEval.Rank, e.state.Pot, winner.Chips, winner.Chips+e.state.Pot)
+		winner.Chips += e.state.Pot
 	}
 
 	e.state.Pot = 0
+	log.Printf("[引擎] ====== 结算完成 ======")
 }
 
 // determineWinnersWithSidePots 使用边池结算判定获胜者

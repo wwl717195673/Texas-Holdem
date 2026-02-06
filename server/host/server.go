@@ -3,6 +3,7 @@ package host
 import (
 	"encoding/json"
 	"log"
+	"math/rand"
 	"net/http"
 	"sync"
 	"time"
@@ -127,24 +128,13 @@ func (s *Server) Run() {
 	}
 }
 
-// handleRegister 处理客户端注册
+// handleRegister 处理客户端注册（仅建立连接，不发送JoinAck，等待客户端发送join请求）
 func (s *Server) handleRegister(client *Client) {
 	s.clientsMu.Lock()
 	s.clients[client.ID] = client
 	s.clientsMu.Unlock()
 
-	log.Printf("Client registered: %s (Total: %d)", client.ID, len(s.clients))
-
-	// 发送欢迎消息
-	welcome := &protocol.JoinAck{
-		BaseMessage: protocol.NewBaseMessage(protocol.MsgTypeJoinAck),
-		Success:     true,
-		PlayerID:    client.ID,
-		Message:     "Welcome to Texas Hold'em Poker!",
-		GameState:   s.getGameStateInfo(""),
-	}
-
-	s.sendToClient(client.ID, welcome)
+	log.Printf("[连接] 新客户端连接 | ID=%s | 游戏=%s | 当前连接数=%d", client.ID, client.GameID, len(s.clients))
 }
 
 // handleUnregister 处理客户端注销
@@ -156,7 +146,12 @@ func (s *Server) handleUnregister(client *Client) {
 	}
 	s.clientsMu.Unlock()
 
-	log.Printf("Client unregistered: %s (Total: %d)", client.ID, len(s.clients))
+	name := client.Name
+	if name == "" {
+		name = "(未命名)"
+	}
+	log.Printf("[断开] 客户端断开 | ID=%s | 玩家=%s | 座位=%d | 剩余连接数=%d",
+		client.ID, name, client.Seat, len(s.clients))
 
 	// 通知其他玩家该玩家离开
 	s.broadcastPlayerLeft(client)
@@ -168,9 +163,12 @@ func (s *Server) handleMessage(msg *ClientMessage) {
 	var baseMsg protocol.BaseMessage
 
 	if err := json.Unmarshal(msg.Data, &baseMsg); err != nil {
+		log.Printf("[消息] 解析失败 | 客户端=%s | 玩家=%s | 原始数据=%s", client.ID, client.Name, string(msg.Data))
 		s.sendError(client.ID, "Invalid message format", 1001)
 		return
 	}
+
+	log.Printf("[消息] 收到 | 类型=%s | 玩家=%s | 客户端=%s", baseMsg.Type, client.Name, client.ID)
 
 	switch baseMsg.Type {
 	case protocol.MsgTypeJoin:
@@ -189,6 +187,7 @@ func (s *Server) handleMessage(msg *ClientMessage) {
 		s.handlePing(client)
 
 	default:
+		log.Printf("[消息] 未知类型 | 类型=%s | 客户端=%s", baseMsg.Type, client.ID)
 		s.sendError(client.ID, "Unknown message type", 1002)
 	}
 }
@@ -249,6 +248,7 @@ func (s *Server) sendToClient(clientID string, msg interface{}) {
 
 // sendError 发送错误消息
 func (s *Server) sendError(clientID string, message string, code int) {
+	log.Printf("[错误] 发送错误给客户端 | 客户端=%s | 错误码=%d | 消息=%s", clientID, code, message)
 	errMsg := &protocol.Error{
 		BaseMessage: protocol.NewBaseMessage(protocol.MsgTypeError),
 		Code:        code,
@@ -269,27 +269,42 @@ func (s *Server) broadcastPlayerLeft(client *Client) {
 	s.broadcastToOthers(client.ID, data)
 }
 
-// onGameStateChange 游戏状态变化回调
+// onGameStateChange 游戏状态变化回调（给每个玩家发送个性化状态，包含各自底牌）
 func (s *Server) onGameStateChange(state *game.GameState) {
-	// 转换为客户端可用的游戏状态
-	stateInfo := s.getGameStateInfo("")
+	log.Printf("[状态推送] 引擎状态变化 | 阶段=%s | 底池=%d | 当前下注=%d | 当前玩家idx=%d | 玩家数=%d",
+		state.Stage, state.Pot, state.CurrentBet, state.CurrentPlayer, len(state.Players))
 
-	// 广播游戏状态更新
-	stateMsg := &protocol.GameState{
-		GameID:         stateInfo.GameID,
-		Stage:          stateInfo.Stage,
-		DealerButton:  stateInfo.DealerButton,
-		CurrentPlayer: stateInfo.CurrentPlayer,
-		CurrentBet:    stateInfo.CurrentBet,
-		Pot:           stateInfo.Pot,
-		CommunityCards: stateInfo.CommunityCards,
-		Players:       stateInfo.Players,
-		MinRaise:      stateInfo.MinRaise,
-		MaxRaise:      stateInfo.MaxRaise,
+	s.clientsMu.RLock()
+	defer s.clientsMu.RUnlock()
+
+	for _, client := range s.clients {
+		// 为每个玩家生成个性化的游戏状态（IsSelf=true 的玩家能看到自己的底牌）
+		stateInfo := s.getGameStateInfo(client.ID)
+		stateMsg := &protocol.GameState{
+			BaseMessage:    protocol.NewBaseMessage(protocol.MsgTypeGameState),
+			GameID:         stateInfo.GameID,
+			Stage:          stateInfo.Stage,
+			DealerButton:   stateInfo.DealerButton,
+			CurrentPlayer:  stateInfo.CurrentPlayer,
+			CurrentBet:     stateInfo.CurrentBet,
+			Pot:            stateInfo.Pot,
+			CommunityCards: stateInfo.CommunityCards,
+			Players:        stateInfo.Players,
+			MinRaise:       stateInfo.MinRaise,
+			MaxRaise:       stateInfo.MaxRaise,
+		}
+
+		data, err := json.Marshal(stateMsg)
+		if err != nil {
+			continue
+		}
+
+		select {
+		case client.Send <- data:
+		default:
+			log.Printf("客户端 %s 发送队列满，跳过状态更新", client.ID)
+		}
 	}
-
-	data, _ := json.Marshal(stateMsg)
-	s.broadcast <- data
 }
 
 // getGameStateInfo 获取游戏状态信息
@@ -413,12 +428,14 @@ func generateClientID() string {
 	return randomID(8)
 }
 
-// randomID 生成随机ID
+// randomID 生成随机ID（使用math/rand确保唯一性）
 func randomID(length int) string {
 	const charset = "abcdefghijklmnopqrstuvwxyz0123456789"
+	src := rand.NewSource(time.Now().UnixNano())
+	r := rand.New(src)
 	b := make([]byte, length)
 	for i := range b {
-		b[i] = charset[time.Now().UnixNano()%int64(len(charset))]
+		b[i] = charset[r.Intn(len(charset))]
 	}
 	return string(b)
 }
