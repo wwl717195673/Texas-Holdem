@@ -19,6 +19,7 @@ const (
 	MsgTypePlayerAction MessageType = "player_action"   // 玩家执行动作
 	MsgTypeChat         MessageType = "chat"            // 发送聊天消息
 	MsgTypePing         MessageType = "ping"           // 心跳检测
+	MsgTypeReadyForNext MessageType = "ready_for_next" // 玩家准备好下一局
 
 	// 服务器 -> 客户端消息类型
 	MsgTypeJoinAck      MessageType = "join_ack"       // 加入游戏确认
@@ -28,6 +29,7 @@ const (
 	MsgTypePlayerLeft   MessageType = "player_left"    // 玩家离开通知
 	MsgTypePlayerActed  MessageType = "player_acted"   // 玩家动作通知
 	MsgTypeShowdown     MessageType = "showdown"      // 摊牌结果
+	MsgTypePlayerReady  MessageType = "player_ready"  // 玩家准备状态通知
 	MsgTypePong         MessageType = "pong"           // 心跳响应
 	MsgTypeError        MessageType = "error"         // 错误消息
 )
@@ -186,6 +188,22 @@ type ChatMessage struct {
 	IsSystem   bool   `json:"is_system"`  // 是否为系统消息
 }
 
+// ReadyForNextRequest 玩家准备下一局请求
+type ReadyForNextRequest struct {
+	BaseMessage
+	PlayerID string `json:"player_id"` // 玩家ID
+}
+
+// PlayerReadyNotify 玩家准备状态通知（服务器广播给所有客户端）
+type PlayerReadyNotify struct {
+	BaseMessage
+	PlayerID     string   `json:"player_id"`     // 准备好的玩家ID
+	PlayerName   string   `json:"player_name"`   // 准备好的玩家名称
+	ReadyPlayers []string `json:"ready_players"` // 已准备好的玩家名称列表
+	TotalPlayers int      `json:"total_players"` // 总玩家数
+	AllReady     bool     `json:"all_ready"`     // 是否所有玩家都准备好了
+}
+
 // Pong 心跳响应
 type Pong struct {
 	BaseMessage
@@ -249,5 +267,13 @@ func NewChatRequest(playerID, content string) *ChatRequest {
 func NewPingRequest() *PingRequest {
 	return &PingRequest{
 		BaseMessage: NewBaseMessage(MsgTypePing),
+	}
+}
+
+// NewReadyForNextRequest 创建准备下一局请求
+func NewReadyForNextRequest(playerID string) *ReadyForNextRequest {
+	return &ReadyForNextRequest{
+		BaseMessage: NewBaseMessage(MsgTypeReadyForNext),
+		PlayerID:    playerID,
 	}
 }

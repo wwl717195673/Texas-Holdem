@@ -23,13 +23,15 @@ type Client struct {
 	reconnecting bool            // 是否正在重连
 	send        chan []byte      // 发送消息通道
 	receive     chan []byte      // 接收消息通道
-	onStateChange func(*protocol.GameState) // 状态变化回调
-	onJoinAck    func(bool, string, int)    // 加入确认回调(success, playerID, seat)
-	onTurn       func(*protocol.YourTurn)   // 轮到玩家回合回调
-	onChat       func(*protocol.ChatMessage) // 收到聊天消息回调
-	onError      func(error)                 // 错误回调
-	onConnect    func()                     // 连接成功回调
-	onDisconnect func()                     // 断开连接回调
+	onStateChange  func(*protocol.GameState)       // 状态变化回调
+	onJoinAck      func(bool, string, int)        // 加入确认回调(success, playerID, seat)
+	onTurn         func(*protocol.YourTurn)       // 轮到玩家回合回调
+	onShowdown     func(*protocol.Showdown)       // 摊牌结果回调
+	onPlayerReady  func(*protocol.PlayerReadyNotify) // 玩家准备状态回调
+	onChat         func(*protocol.ChatMessage)    // 收到聊天消息回调
+	onError        func(error)                    // 错误回调
+	onConnect      func()                         // 连接成功回调
+	onDisconnect   func()                         // 断开连接回调
 	mu          sync.RWMutex  // 读写锁
 	done        chan struct{}  // 关闭信号
 }
@@ -39,13 +41,15 @@ type Config struct {
 	ServerURL   string               // 服务器地址
 	PlayerName  string               // 玩家名称
 	Seat        int                  // 请求座位号（-1表示随机）
-	OnStateChange func(*protocol.GameState) // 状态变化回调
-	OnJoinAck    func(bool, string, int)    // 加入确认回调(success, playerID, seat)
-	OnTurn       func(*protocol.YourTurn)   // 轮到玩家回合回调
-	OnChat       func(*protocol.ChatMessage) // 收到聊天消息回调
-	OnError      func(error)                 // 错误回调
-	OnConnect    func()                     // 连接成功回调
-	OnDisconnect func()                     // 断开连接回调
+	OnStateChange  func(*protocol.GameState)       // 状态变化回调
+	OnJoinAck      func(bool, string, int)        // 加入确认回调(success, playerID, seat)
+	OnTurn         func(*protocol.YourTurn)       // 轮到玩家回合回调
+	OnShowdown     func(*protocol.Showdown)       // 摊牌结果回调
+	OnPlayerReady  func(*protocol.PlayerReadyNotify) // 玩家准备状态回调
+	OnChat         func(*protocol.ChatMessage)    // 收到聊天消息回调
+	OnError        func(error)                    // 错误回调
+	OnConnect      func()                         // 连接成功回调
+	OnDisconnect   func()                         // 断开连接回调
 }
 
 // NewClient 创建新的客户端
@@ -55,13 +59,15 @@ func NewClient(config *Config) *Client {
 		playerName:  config.PlayerName,
 		send:        make(chan []byte, 256),
 		receive:     make(chan []byte, 256),
-		onStateChange: config.OnStateChange,
-		onJoinAck:     config.OnJoinAck,
-		onTurn:        config.OnTurn,
-		onChat:        config.OnChat,
-		onError:       config.OnError,
-		onConnect:     config.OnConnect,
-		onDisconnect:  config.OnDisconnect,
+		onStateChange:  config.OnStateChange,
+		onJoinAck:      config.OnJoinAck,
+		onTurn:         config.OnTurn,
+		onShowdown:     config.OnShowdown,
+		onPlayerReady:  config.OnPlayerReady,
+		onChat:         config.OnChat,
+		onError:        config.OnError,
+		onConnect:      config.OnConnect,
+		onDisconnect:   config.OnDisconnect,
 		done:         make(chan struct{}),
 	}
 }
@@ -225,6 +231,12 @@ func (c *Client) SendPing() error {
 	return c.Send(req)
 }
 
+// SendReadyForNext 发送准备下一局请求
+func (c *Client) SendReadyForNext() error {
+	req := protocol.NewReadyForNextRequest(c.playerID)
+	return c.Send(req)
+}
+
 // PlayerID 获取玩家ID
 func (c *Client) PlayerID() string {
 	return c.playerID
@@ -327,14 +339,20 @@ func (c *Client) handleMessage(data []byte) {
 	case protocol.MsgTypeChat:
 		c.handleChat(data)
 
+	case protocol.MsgTypeShowdown:
+		c.handleShowdown(data)
+
+	case protocol.MsgTypePlayerReady:
+		c.handlePlayerReady(data)
+
 	case protocol.MsgTypePlayerJoined:
-		// 广播新玩家加入，忽略
+		c.handlePlayerJoined(data)
 
 	case protocol.MsgTypePlayerLeft:
-		// 广播玩家离开，忽略
+		c.handlePlayerLeft(data)
 
 	case protocol.MsgTypePlayerActed:
-		// 广播玩家动作，忽略
+		c.handlePlayerActed(data)
 
 	case protocol.MsgTypePong:
 		// 心跳响应，忽略
@@ -373,18 +391,16 @@ func (c *Client) handleJoinAck(data []byte) {
 }
 
 // handleGameState 处理游戏状态更新
+// 服务器直接发送 protocol.GameState 结构，不是嵌套的
 func (c *Client) handleGameState(data []byte) {
-	var msg struct {
-		protocol.BaseMessage
-		GameState *protocol.GameState `json:"game_state"`
-	}
-	if err := json.Unmarshal(data, &msg); err != nil {
+	var gameState protocol.GameState
+	if err := json.Unmarshal(data, &gameState); err != nil {
 		log.Printf("Failed to unmarshal GameState: %v", err)
 		return
 	}
 
-	if msg.GameState != nil && c.onStateChange != nil {
-		c.onStateChange(msg.GameState)
+	if c.onStateChange != nil {
+		c.onStateChange(&gameState)
 	}
 }
 
@@ -414,6 +430,62 @@ func (c *Client) handleChat(data []byte) {
 	if c.onChat != nil {
 		c.onChat(&msg)
 	}
+}
+
+// handleShowdown 处理摊牌结果消息
+func (c *Client) handleShowdown(data []byte) {
+	var msg protocol.Showdown
+	if err := json.Unmarshal(data, &msg); err != nil {
+		log.Printf("Failed to unmarshal Showdown: %v", err)
+		return
+	}
+
+	if c.onShowdown != nil {
+		c.onShowdown(&msg)
+	}
+}
+
+// handlePlayerReady 处理玩家准备状态通知
+func (c *Client) handlePlayerReady(data []byte) {
+	var msg protocol.PlayerReadyNotify
+	if err := json.Unmarshal(data, &msg); err != nil {
+		log.Printf("Failed to unmarshal PlayerReady: %v", err)
+		return
+	}
+
+	if c.onPlayerReady != nil {
+		c.onPlayerReady(&msg)
+	}
+}
+
+// handlePlayerJoined 处理玩家加入通知
+func (c *Client) handlePlayerJoined(data []byte) {
+	var msg protocol.PlayerJoined
+	if err := json.Unmarshal(data, &msg); err != nil {
+		log.Printf("Failed to unmarshal PlayerJoined: %v", err)
+		return
+	}
+	// 通过回调传递（如果有）
+}
+
+// handlePlayerLeft 处理玩家离开通知
+func (c *Client) handlePlayerLeft(data []byte) {
+	var msg protocol.PlayerLeft
+	if err := json.Unmarshal(data, &msg); err != nil {
+		log.Printf("Failed to unmarshal PlayerLeft: %v", err)
+		return
+	}
+	// 通过回调传递（如果有）
+}
+
+// handlePlayerActed 处理玩家动作通知
+func (c *Client) handlePlayerActed(data []byte) {
+	var msg protocol.PlayerActed
+	if err := json.Unmarshal(data, &msg); err != nil {
+		log.Printf("Failed to unmarshal PlayerActed: %v", err)
+		return
+	}
+	// 通过回调传递（如果有）
 }
 
 // handleError 处理错误消息

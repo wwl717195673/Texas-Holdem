@@ -175,11 +175,9 @@ func (s *Server) handlePlayerAction(client *Client, data []byte) {
 		// 广播结算详情给所有玩家
 		s.broadcastShowdownResult(afterState)
 
-		log.Printf("[状态机] 3秒后自动开始下一局...")
-		go func() {
-			time.Sleep(3 * time.Second)
-			s.tryAutoStartHand()
-		}()
+		// 重置准备状态，等待玩家确认下一局
+		s.resetReadyState()
+		log.Printf("[状态机] 等待所有玩家确认下一局...")
 		return
 	}
 
@@ -398,6 +396,81 @@ func (s *Server) broadcastShowdownResult(state *gamepkg.GameState) {
 	log.Printf("[结算广播] 广播结算结果 | 总底池=%d | 赢家数=%d | 提前结束=%v",
 		sd.TotalPot, len(winners), sd.IsEarlyEnd)
 	s.broadcast <- data
+}
+
+// ==================== 准备下一局相关方法 ====================
+
+// handleReadyForNext 处理玩家准备下一局请求
+func (s *Server) handleReadyForNext(client *Client, data []byte) {
+	log.Printf("[准备] 收到请求 | 玩家=%s | 客户端ID=%s", client.Name, client.ID)
+
+	// 检查当前是否处于等待准备状态
+	state := s.gameEngine.GetState()
+	if state.Stage != gamepkg.StageEnd && state.Stage != gamepkg.StageShowdown && state.Stage != gamepkg.StageWaiting {
+		log.Printf("[准备] 拒绝 | 玩家=%s | 原因=当前阶段(%s)不在结算状态", client.Name, state.Stage)
+		s.sendError(client.ID, "当前不在结算阶段", 4001)
+		return
+	}
+
+	// 标记该玩家已准备
+	s.readyMu.Lock()
+	s.readyPlayers[client.ID] = true
+	s.waitingReady = true
+	s.readyMu.Unlock()
+
+	// 构建已准备玩家名称列表
+	readyNames := s.getReadyPlayerNames()
+	totalPlayers := len(state.Players)
+	allReady := len(readyNames) >= totalPlayers
+
+	log.Printf("[准备] 玩家 %s 已准备 | 已准备=%d/%d | 全部准备=%v",
+		client.Name, len(readyNames), totalPlayers, allReady)
+
+	// 广播准备状态给所有玩家
+	readyMsg := &protocol.PlayerReadyNotify{
+		BaseMessage:  protocol.NewBaseMessage(protocol.MsgTypePlayerReady),
+		PlayerID:     client.ID,
+		PlayerName:   client.Name,
+		ReadyPlayers: readyNames,
+		TotalPlayers: totalPlayers,
+		AllReady:     allReady,
+	}
+	msgData, _ := json.Marshal(readyMsg)
+	s.broadcast <- msgData
+
+	// 如果所有玩家都准备好了，开始下一局
+	if allReady {
+		log.Printf("[准备] 所有玩家已准备，开始下一局!")
+		s.resetReadyState()
+		s.tryAutoStartHand()
+	}
+}
+
+// resetReadyState 重置所有玩家的准备状态
+func (s *Server) resetReadyState() {
+	s.readyMu.Lock()
+	defer s.readyMu.Unlock()
+
+	s.readyPlayers = make(map[string]bool)
+	s.waitingReady = true
+	log.Printf("[准备] 已重置所有玩家准备状态")
+}
+
+// getReadyPlayerNames 获取已准备玩家的名称列表
+func (s *Server) getReadyPlayerNames() []string {
+	s.readyMu.RLock()
+	defer s.readyMu.RUnlock()
+
+	s.clientsMu.RLock()
+	defer s.clientsMu.RUnlock()
+
+	var names []string
+	for playerID := range s.readyPlayers {
+		if client, ok := s.clients[playerID]; ok {
+			names = append(names, client.Name)
+		}
+	}
+	return names
 }
 
 // ==================== 日志辅助方法 ====================

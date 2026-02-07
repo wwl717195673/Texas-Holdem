@@ -49,6 +49,9 @@ type Server struct {
 	handleMsg    chan *ClientMessage    // 消息处理通道
 	gameStarted  bool                   // 游戏是否已开始
 	gameEngineMu sync.RWMutex          // 游戏引擎锁
+	readyPlayers map[string]bool        // 已准备好下一局的玩家（playerID -> ready）
+	readyMu      sync.RWMutex          // 准备状态锁
+	waitingReady bool                   // 是否正在等待玩家准备
 }
 
 // ClientMessage 客户端消息
@@ -60,15 +63,17 @@ type ClientMessage struct {
 // NewServer 创建新的游戏服务器
 func NewServer(config *game.Config) *Server {
 	s := &Server{
-		gameEngine:  game.NewEngine(config),
-		gameID:      "",
-		upgrader:    upgrader,
-		clients:     make(map[string]*Client),
-		register:    make(chan *Client, 10),
-		unregister:  make(chan *Client, 10),
-		broadcast:   make(chan []byte, 100),
-		handleMsg:   make(chan *ClientMessage, 100),
-		gameStarted: false,
+		gameEngine:   game.NewEngine(config),
+		gameID:       "",
+		upgrader:     upgrader,
+		clients:      make(map[string]*Client),
+		register:     make(chan *Client, 10),
+		unregister:   make(chan *Client, 10),
+		broadcast:    make(chan []byte, 100),
+		handleMsg:    make(chan *ClientMessage, 100),
+		gameStarted:  false,
+		readyPlayers: make(map[string]bool),
+		waitingReady: false,
 	}
 
 	// 设置状态变化回调
@@ -185,6 +190,9 @@ func (s *Server) handleMessage(msg *ClientMessage) {
 
 	case protocol.MsgTypePing:
 		s.handlePing(client)
+
+	case protocol.MsgTypeReadyForNext:
+		s.handleReadyForNext(client, msg.Data)
 
 	default:
 		log.Printf("[消息] 未知类型 | 类型=%s | 客户端=%s", baseMsg.Type, client.ID)

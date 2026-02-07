@@ -58,6 +58,11 @@ type ShowdownMsg struct {
 	Showdown *protocol.Showdown
 }
 
+// PlayerReadyMsg 玩家准备状态通知消息
+type PlayerReadyMsg struct {
+	Notify *protocol.PlayerReadyNotify
+}
+
 // ChatMsg 聊天消息
 type ChatMsg struct {
 	Message *protocol.ChatMessage

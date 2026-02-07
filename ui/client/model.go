@@ -3,6 +3,7 @@ package client
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -98,17 +99,18 @@ var (
 type ScreenType int
 
 const (
-	ScreenConnect ScreenType = iota // 连接屏幕
-	ScreenLobby                    // 大厅屏幕
-	ScreenGame                     // 游戏屏幕
-	ScreenAction                   // 动作输入屏幕
-	ScreenShowdown                 // 摊牌结果屏幕
-	ScreenChat                     // 聊天屏幕
+	ScreenConnect  ScreenType = iota // 连接屏幕
+	ScreenLobby                     // 大厅屏幕
+	ScreenGame                      // 游戏屏幕
+	ScreenAction                    // 动作输入屏幕
+	ScreenShowdown                  // 摊牌结果屏幕
+	ScreenResult                    // 结算屏幕
+	ScreenChat                      // 聊天屏幕
 )
 
 // String 返回屏幕类型的字符串表示
 func (s ScreenType) String() string {
-	names := []string{"连接", "大厅", "游戏", "动作", "摊牌", "聊天"}
+	names := []string{"连接", "大厅", "游戏", "动作", "摊牌", "结算", "聊天"}
 	if int(s) < len(names) {
 		return names[s]
 	}
@@ -147,6 +149,19 @@ type Model struct {
 
 	// 摊牌结果
 	showdown *protocol.Showdown // 摊牌结果
+
+	// 游戏结算
+	gameResult      *protocol.Showdown // 游戏结算结果
+	finalChips      int                // 最终筹码
+	initialChips    int                // 初始筹码
+	chipsWon        int                // 赢得筹码
+	gameWon         bool               // 是否获胜
+
+	// 结算后准备状态
+	readyPlayers    []string // 已准备好的玩家名称列表
+	totalPlayers    int      // 总玩家数
+	selfReady       bool     // 自己是否已准备
+	resultChoice    int      // 结算屏幕选择：0=下一局，1=退出
 
 	// 聊天
 	chatModel *components.ChatModel // 聊天组件
@@ -187,8 +202,28 @@ func NewModel() *Model {
 
 // Init 初始化模型
 func (m *Model) Init() tea.Cmd {
-	// 启动一个协程监听外部消息通道
-	return m.waitForExtMsg()
+	// 启动监听外部消息的循环，但不阻塞键盘输入
+	// 使用 tick 来定期检查通道
+	return m.tick()
+}
+
+// tickMsg 自定义的 tick 消息，用于持续检查外部通道
+type tickMsg time.Time
+
+// tick 定期检查外部消息通道
+// 每次都返回一个新的 tick 命令，确保持续检查
+func (m *Model) tick() tea.Cmd {
+	return tea.Tick(time.Millisecond*100, func(t time.Time) tea.Msg {
+		select {
+		case msg := <-m.extMsgChan:
+			// 收到外部消息，返回该消息，并继续 tick
+			// 在 Update 中处理消息后会再次调用 tick
+			return msg
+		default:
+			// 没有消息，返回 tickMsg 保持循环
+			return tickMsg(t)
+		}
+	})
 }
 
 // waitForExtMsg 等待外部消息
@@ -205,7 +240,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.chatModel, cmd = m.chatModel.Update(msg)
 		if cmd != nil {
-			return m, tea.Batch(cmd, m.waitForExtMsg())
+			return m, tea.Batch(cmd, m.tick())
 		}
 	}
 
@@ -214,22 +249,27 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		return m.handleKeyMsg(msg)
 
+	case tickMsg:
+		// tick 消息，继续检查通道
+		return m, m.tick()
+
 	case tea.WindowSizeMsg:
 		// 窗口大小变化，可以更新组件尺寸
-		return m, nil
+		// 继续等待外部消息
+		return m, m.tick()
 
 	// 服务器消息
 	case ConnectedMsg:
 		m.connected = true
 		m.connecting = false
-		return m, m.waitForExtMsg()
+		return m, m.tick()
 
 	case DisconnectedMsg:
 		m.connected = false
 		m.connecting = false
 		m.err = fmt.Errorf("与服务器断开连接")
 		m.screen = ScreenConnect
-		return m, m.waitForExtMsg()
+		return m, m.tick()
 
 	case JoinAckResultMsg:
 		if msg.Success {
@@ -240,15 +280,22 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.connecting = false
 			m.err = fmt.Errorf("加入游戏失败")
 		}
-		return m, m.waitForExtMsg()
+		return m, m.tick()
 
 	case GameStateMsg:
 		m.gameState = msg.State
-		// 如果在摊牌屏幕，收到新游戏状态则返回游戏屏幕
-		if m.screen == ScreenShowdown {
+		// 如果在大厅屏幕，收到游戏状态则切换到游戏屏幕
+		if m.screen == ScreenLobby {
 			m.screen = ScreenGame
 		}
-		return m, m.waitForExtMsg()
+		// 如果在摊牌或结算屏幕，收到新游戏状态（说明新局开始了）则返回游戏屏幕
+		if m.screen == ScreenShowdown || m.screen == ScreenResult {
+			m.screen = ScreenGame
+			// 重置准备状态
+			m.selfReady = false
+			m.readyPlayers = nil
+		}
+		return m, m.tick()
 
 	case YourTurnMsg:
 		m.isYourTurn = true
@@ -257,16 +304,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.maxRaise = msg.Turn.MaxAction
 		m.timeLeft = msg.Turn.TimeLeft
 		m.addNotification("轮到你行动了!")
-		return m, m.waitForExtMsg()
+		return m, m.tick()
 
 	case PlayerJoinedMsg:
 		m.addNotification(fmt.Sprintf("玩家 %s 加入了游戏 (座位 %d)",
 			msg.Player.Name, msg.Player.Seat+1))
-		return m, m.waitForExtMsg()
+		return m, m.tick()
 
 	case PlayerLeftMsg:
 		m.addNotification(fmt.Sprintf("玩家 %s 离开了游戏", msg.PlayerName))
-		return m, m.waitForExtMsg()
+		return m, m.tick()
 
 	case PlayerActedMsg:
 		actionText := getActionText(msg.Action)
@@ -275,13 +322,50 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.addNotification(fmt.Sprintf("%s %s", msg.PlayerName, actionText))
 		}
-		return m, m.waitForExtMsg()
+		return m, m.tick()
 
 	case ShowdownMsg:
 		m.showdown = msg.Showdown
+		m.gameResult = msg.Showdown
 		m.isYourTurn = false
+
+		// 计算玩家的筹码变化
+		m.gameWon = false
+		m.chipsWon = 0
+		m.finalChips = 0
+
+		for _, p := range msg.Showdown.AllPlayers {
+			// 通过玩家名称匹配（因为 PlayerDetail 中没有 PlayerID）
+			if p.PlayerName == m.playerName {
+				m.chipsWon = p.WonAmount
+				m.finalChips = p.ChipsAfter
+				m.gameWon = p.IsWinner
+				break
+			}
+		}
+
+		// 重置准备状态
+		m.selfReady = false
+		m.readyPlayers = nil
+		m.totalPlayers = len(msg.Showdown.AllPlayers)
+		m.resultChoice = 0
+
+		// 先显示摊牌屏幕
 		m.screen = ScreenShowdown
-		return m, m.waitForExtMsg()
+		return m, m.tick()
+
+	case PlayerReadyMsg:
+		// 更新准备状态
+		m.readyPlayers = msg.Notify.ReadyPlayers
+		m.totalPlayers = msg.Notify.TotalPlayers
+
+		if msg.Notify.AllReady {
+			m.addNotification("所有玩家已准备，开始下一局!")
+		} else {
+			m.addNotification(fmt.Sprintf("玩家 %s 已准备 (%d/%d)",
+				msg.Notify.PlayerName, len(msg.Notify.ReadyPlayers), msg.Notify.TotalPlayers))
+		}
+		return m, m.tick()
 
 	case ChatMsg:
 		// 添加聊天消息
@@ -290,15 +374,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.chatModel.AddMessage(msg.Message.PlayerID, msg.Message.PlayerName, msg.Message.Content)
 		}
-		return m, m.waitForExtMsg()
+		return m, m.tick()
 
 	case ErrorMsg:
 		m.err = msg.Err
-		return m, m.waitForExtMsg()
+		return m, m.tick()
 	}
 
 	// 默认继续等待外部消息
-	return m, m.waitForExtMsg()
+	return m, m.tick()
 }
 
 // View 渲染视图
@@ -314,6 +398,8 @@ func (m *Model) View() string {
 		return m.viewAction()
 	case ScreenShowdown:
 		return m.viewShowdown()
+	case ScreenResult:
+		return m.viewResult()
 	case ScreenChat:
 		return m.viewChat()
 	default:
@@ -342,11 +428,13 @@ func (m *Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.updateAction(msg)
 	case ScreenShowdown:
 		return m.updateShowdown(msg)
+	case ScreenResult:
+		return m.updateResult(msg)
 	case ScreenChat:
 		return m.updateChat(msg)
 	}
 
-	return m, nil
+	return m, m.tick()
 }
 
 // ==================== 连接屏幕 ====================
@@ -360,18 +448,19 @@ func (m *Model) updateConnect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.connecting = true
 			m.err = nil
 			cmd := m.doConnect()
-			return m, cmd
+			return m, tea.Batch(cmd, m.tick())
 		}
+		return m, m.tick()
 
 	case "tab":
 		// 切换输入框
 		m.connectField = (m.connectField + 1) % 2
-		return m, nil
+		return m, m.tick()
 
 	case "up", "shift+tab":
 		// 上一个输入框
 		m.connectField = (m.connectField - 1 + 2) % 2
-		return m, nil
+		return m, m.tick()
 
 	case "backspace":
 		// 删除字符
@@ -384,7 +473,7 @@ func (m *Model) updateConnect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.playerInput = m.playerInput[:len(m.playerInput)-1]
 			}
 		}
-		return m, nil
+		return m, m.tick()
 
 	default:
 		// 输入字符
@@ -400,9 +489,8 @@ func (m *Model) updateConnect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
+		return m, m.tick()
 	}
-
-	return m, nil
 }
 
 // doConnect 执行连接
@@ -425,6 +513,12 @@ func (m *Model) doConnect() tea.Cmd {
 		},
 		OnTurn: func(turn *protocol.YourTurn) {
 			m.extMsgChan <- YourTurnMsg{Turn: turn}
+		},
+		OnShowdown: func(showdown *protocol.Showdown) {
+			m.extMsgChan <- ShowdownMsg{Showdown: showdown}
+		},
+		OnPlayerReady: func(notify *protocol.PlayerReadyNotify) {
+			m.extMsgChan <- PlayerReadyMsg{Notify: notify}
 		},
 		OnChat: func(chatMsg *protocol.ChatMessage) {
 			m.extMsgChan <- ChatMsg{Message: chatMsg}
@@ -521,16 +615,16 @@ func (m *Model) updateLobby(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		// 进入游戏（实际上游戏由服务器控制）
 		m.addNotification("等待游戏开始...")
-		return m, m.waitForExtMsg()
+		return m, m.tick()
 
 	case "h":
 		// 打开聊天
 		m.chatModel.SetVisible(true)
 		m.screen = ScreenChat
-		return m, m.waitForExtMsg()
+		return m, m.tick()
 	}
 
-	return m, m.waitForExtMsg()
+	return m, m.tick()
 }
 
 // viewLobby 渲染大厅屏幕
@@ -590,11 +684,18 @@ func (m *Model) updateGame(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "f":
 		// 弃牌
-		return m, m.sendAction(models.ActionFold, 0)
+		return m, tea.Batch(m.sendAction(models.ActionFold, 0), m.tick())
 
-	case "c":
-		// 跟注/看牌
-		return m, m.sendAction(models.ActionCall, 0)
+	case "c", "k":
+		// 跟注/过牌 - 需要计算实际发送的动作类型
+		toCall := m.calculateToCall()
+		if toCall > 0 {
+			// 需要跟注
+			return m, tea.Batch(m.sendAction(models.ActionCall, 0), m.tick())
+		} else {
+			// 可以过牌
+			return m, tea.Batch(m.sendAction(models.ActionCheck, 0), m.tick())
+		}
 
 	case "r":
 		// 加注
@@ -604,24 +705,24 @@ func (m *Model) updateGame(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else {
 			m.addNotification("还没轮到你")
 		}
-		return m, nil
+		return m, m.tick()
 
 	case "a":
 		// 全下
-		return m, m.sendAction(models.ActionAllIn, 0)
+		return m, tea.Batch(m.sendAction(models.ActionAllIn, 0), m.tick())
 
 	case "h":
 		// 聊天
 		m.chatModel.SetVisible(true)
 		m.screen = ScreenChat
-		return m, nil
+		return m, m.tick()
 
 	case "q":
 		// 退出
 		return m, tea.Quit
 	}
 
-	return m, nil
+	return m, m.tick()
 }
 
 // sendAction 发送玩家动作
@@ -780,14 +881,39 @@ func (m *Model) renderPlayers() string {
 func (m *Model) renderActionPrompt() string {
 	var actions []string
 
+	// 计算玩家需要跟注的金额
+	toCall := 0
+	if m.gameState != nil {
+		for _, p := range m.gameState.Players {
+			// 使用 IsSelf 字段来判断是否是自己
+			if p.IsSelf {
+				toCall = m.gameState.CurrentBet - p.CurrentBet
+				break
+			}
+		}
+	}
+
+	// 判断是否可以过牌（无需跟注）
+	canCheck := toCall == 0
+
 	if m.isYourTurn {
 		actions = append(actions, styleAction.Render("[F] 弃牌"))
-		actions = append(actions, styleAction.Render("[C] 跟注"))
+		if canCheck {
+			// 可以过牌
+			actions = append(actions, styleAction.Render("[K] 过牌"))
+		} else {
+			// 需要跟注
+			actions = append(actions, styleAction.Render(fmt.Sprintf("[C] 跟注 %d", toCall)))
+		}
 		actions = append(actions, styleAction.Render("[R] 加注"))
 		actions = append(actions, styleAction.Render("[A] 全下"))
 	} else {
 		actions = append(actions, styleInactive.Render("[F] 弃牌"))
-		actions = append(actions, styleInactive.Render("[C] 跟注"))
+		if canCheck {
+			actions = append(actions, styleInactive.Render("[K] 过牌"))
+		} else {
+			actions = append(actions, styleInactive.Render(fmt.Sprintf("[C] 跟注 %d", toCall)))
+		}
 		actions = append(actions, styleInactive.Render("[R] 加注"))
 		actions = append(actions, styleInactive.Render("[A] 全下"))
 	}
@@ -809,21 +935,21 @@ func (m *Model) updateAction(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		fmt.Sscanf(m.actionInput, "%d", &amount)
 		if amount > 0 {
 			m.screen = ScreenGame
-			return m, m.sendAction(models.ActionRaise, amount)
+			return m, tea.Batch(m.sendAction(models.ActionRaise, amount), m.tick())
 		}
-		return m, nil
+		return m, m.tick()
 
 	case "esc":
 		// 取消
 		m.screen = ScreenGame
-		return m, nil
+		return m, m.tick()
 
 	case "backspace":
 		// 删除字符
 		if len(m.actionInput) > 0 {
 			m.actionInput = m.actionInput[:len(m.actionInput)-1]
 		}
-		return m, nil
+		return m, m.tick()
 
 	default:
 		// 输入数字
@@ -835,7 +961,7 @@ func (m *Model) updateAction(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	return m, nil
+	return m, m.tick()
 }
 
 // viewAction 渲染动作屏幕
@@ -875,13 +1001,13 @@ func (m *Model) viewAction() string {
 // updateShowdown 更新摊牌屏幕
 func (m *Model) updateShowdown(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "enter", "esc", "q":
-		// 返回游戏屏幕
-		m.screen = ScreenGame
-		return m, nil
+	case "enter", "esc", "q", " ":
+		// 进入结算屏幕
+		m.screen = ScreenResult
+		return m, m.tick()
 	}
 
-	return m, nil
+	return m, m.tick()
 }
 
 // viewShowdown 渲染摊牌屏幕
@@ -972,7 +1098,7 @@ func (m *Model) viewShowdown() string {
 	}
 
 	content.WriteString("\n")
-	content.WriteString(styleInactive.Render("[Enter] 返回游戏"))
+	content.WriteString(styleInactive.Render("[Enter] 查看结算"))
 
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -980,6 +1106,198 @@ func (m *Model) viewShowdown() string {
 		Padding(1).
 		Width(70).
 		Render(content.String())
+}
+
+// ==================== 结算屏幕 ====================
+
+// updateResult 更新结算屏幕
+func (m *Model) updateResult(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "up", "k":
+		// 切换到上一个选项
+		if m.resultChoice > 0 {
+			m.resultChoice--
+		}
+		return m, m.tick()
+
+	case "down", "j":
+		// 切换到下一个选项
+		if m.resultChoice < 1 {
+			m.resultChoice++
+		}
+		return m, m.tick()
+
+	case "enter", " ":
+		if m.resultChoice == 0 {
+			// 选择"下一局" - 发送准备请求
+			if !m.selfReady {
+				m.selfReady = true
+				m.addNotification("已准备，等待其他玩家...")
+				return m, tea.Batch(m.sendReadyForNext(), m.tick())
+			}
+			return m, m.tick()
+		}
+		// 选择"退出"
+		return m, tea.Quit
+
+	case "q":
+		// 退出游戏
+		return m, tea.Quit
+	}
+
+	return m, m.tick()
+}
+
+// sendReadyForNext 发送准备下一局请求
+func (m *Model) sendReadyForNext() tea.Cmd {
+	return func() tea.Msg {
+		if err := m.client.SendReadyForNext(); err != nil {
+			return ErrorMsg{Err: err}
+		}
+		return nil
+	}
+}
+
+// viewResult 渲染结算屏幕
+func (m *Model) viewResult() string {
+	var content strings.Builder
+
+	// 标题
+	if m.gameWon {
+		content.WriteString(styleHighlight.Render("★ 本局获胜! ★"))
+	} else {
+		content.WriteString(styleSubtitle.Render("本局结束"))
+	}
+	content.WriteString("\n\n")
+
+	// 筹码变化
+	content.WriteString(stylePot.Render(fmt.Sprintf("筹码变化: %+d", m.chipsWon)))
+	content.WriteString("\n")
+	content.WriteString(fmt.Sprintf("最终筹码: %d", m.finalChips))
+	content.WriteString("\n\n")
+
+	// 获胜者列表
+	if m.gameResult != nil && len(m.gameResult.Winners) > 0 {
+		content.WriteString(styleSubtitle.Render("获胜者:"))
+		content.WriteString("\n")
+		for _, w := range m.gameResult.Winners {
+			handName := w.HandName
+			if handName == "" {
+				handName = "高牌"
+			}
+			isYou := ""
+			if w.PlayerName == m.playerName {
+				isYou = " (你)"
+			}
+			content.WriteString(styleActive.Render(fmt.Sprintf("  ★ %s%s 以 [%s] 赢得 %d\n",
+				w.PlayerName, isYou, handName, w.WonChips)))
+		}
+		content.WriteString("\n")
+	}
+
+	// 所有玩家详情
+	if m.gameResult != nil {
+		content.WriteString(styleSubtitle.Render("玩家详情:"))
+		content.WriteString("\n")
+		for _, p := range m.gameResult.AllPlayers {
+			marker := " "
+			if p.IsWinner {
+				marker = "★"
+			}
+			isYou := ""
+			if p.PlayerName == m.playerName {
+				isYou = " ◀"
+			}
+
+			if p.IsFolded {
+				content.WriteString(fmt.Sprintf("  %s %-10s [已弃牌]%s\n", marker, p.PlayerName, isYou))
+			} else {
+				holeCards := components.RenderCardsCompact(p.HoleCards[:], true)
+				handName := p.HandName
+				if handName == "" {
+					handName = "-"
+				}
+				content.WriteString(fmt.Sprintf("  %s %-10s 底牌: %s  牌型: %s%s\n",
+					marker, p.PlayerName, holeCards, handName, isYou))
+			}
+
+			if p.WonAmount > 0 {
+				content.WriteString(styleActive.Render(fmt.Sprintf("              赢得 +%d (剩余: %d)\n", p.WonAmount, p.ChipsAfter)))
+			} else if p.WonAmount < 0 {
+				content.WriteString(styleInactive.Render(fmt.Sprintf("              输掉 %d (剩余: %d)\n", -p.WonAmount, p.ChipsAfter)))
+			}
+		}
+	}
+
+	content.WriteString("\n")
+	content.WriteString(styleSubtitle.Render("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"))
+	content.WriteString("\n")
+
+	// 准备状态显示
+	content.WriteString(m.renderReadyStatus())
+	content.WriteString("\n")
+
+	// 选择菜单
+	content.WriteString(m.renderResultMenu())
+
+	return lipgloss.Place(
+		70, 35,
+		lipgloss.Center, lipgloss.Center,
+		styleBox.Render(content.String()),
+	)
+}
+
+// renderReadyStatus 渲染玩家准备状态
+func (m *Model) renderReadyStatus() string {
+	var content strings.Builder
+
+	if len(m.readyPlayers) > 0 {
+		content.WriteString(styleSubtitle.Render(fmt.Sprintf("  准备状态 (%d/%d):",
+			len(m.readyPlayers), m.totalPlayers)))
+		content.WriteString("\n")
+
+		// 显示已准备的玩家
+		for _, name := range m.readyPlayers {
+			isYou := ""
+			if name == m.playerName {
+				isYou = " (你)"
+			}
+			content.WriteString(styleActive.Render(fmt.Sprintf("    ✓ %s%s", name, isYou)))
+			content.WriteString("\n")
+		}
+	}
+
+	return content.String()
+}
+
+// renderResultMenu 渲染结算屏幕选择菜单
+func (m *Model) renderResultMenu() string {
+	var content strings.Builder
+
+	// 选项 0: 下一局
+	nextLabel := "下一局"
+	if m.selfReady {
+		nextLabel = "已准备，等待其他玩家..."
+	}
+	if m.resultChoice == 0 {
+		content.WriteString(styleButtonActive.Render(fmt.Sprintf(" ▸ %s ", nextLabel)))
+	} else {
+		content.WriteString(styleButton.Render(fmt.Sprintf("   %s ", nextLabel)))
+	}
+	content.WriteString("\n\n")
+
+	// 选项 1: 退出
+	if m.resultChoice == 1 {
+		content.WriteString(styleButtonActive.Render(" ▸ 退出游戏 "))
+	} else {
+		content.WriteString(styleButton.Render("   退出游戏 "))
+	}
+	content.WriteString("\n\n")
+
+	// 快捷键提示
+	content.WriteString(styleInactive.Render("[↑/↓] 选择  [Enter] 确认  [Q] 退出"))
+
+	return content.String()
 }
 
 // ==================== 聊天屏幕 ====================
@@ -991,7 +1309,7 @@ func (m *Model) updateChat(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// 关闭聊天
 		m.chatModel.SetVisible(false)
 		m.screen = ScreenGame
-		return m, nil
+		return m, m.tick()
 
 	case "enter":
 		// 发送消息
@@ -1001,10 +1319,10 @@ func (m *Model) updateChat(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			_ = m.client.SendChat(input)
 			m.chatModel.ClearInput()
 		}
-		return m, nil
+		return m, m.tick()
 	}
 
-	return m, nil
+	return m, m.tick()
 }
 
 // viewChat 渲染聊天屏幕
@@ -1013,6 +1331,19 @@ func (m *Model) viewChat() string {
 }
 
 // ==================== 辅助方法 ====================
+
+// calculateToCall 计算需要跟注的金额
+func (m *Model) calculateToCall() int {
+	if m.gameState == nil {
+		return 0
+	}
+	for _, p := range m.gameState.Players {
+		if p.IsSelf {
+			return m.gameState.CurrentBet - p.CurrentBet
+		}
+	}
+	return 0
+}
 
 // addNotification 添加通知消息
 func (m *Model) addNotification(msg string) {
