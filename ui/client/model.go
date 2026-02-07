@@ -2,240 +2,303 @@ package client
 
 import (
 	"fmt"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/wilenwang/just_play/Texas-Holdem/internal/card"
 	"github.com/wilenwang/just_play/Texas-Holdem/internal/common/models"
 	"github.com/wilenwang/just_play/Texas-Holdem/internal/protocol"
 	"github.com/wilenwang/just_play/Texas-Holdem/server/client"
+	"github.com/wilenwang/just_play/Texas-Holdem/ui/components"
 )
 
-// 样式定义
+// ==================== 样式定义 ====================
+
 var (
-	styleTitle      = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FF79C6")).MarginBottom(1)
-	styleSubtitle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#6272A4"))
-	styleBox        = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(1)
-	styleActive     = lipgloss.NewStyle().Foreground(lipgloss.Color("#50FA7B"))
-	styleInactive   = lipgloss.NewStyle().Foreground(lipgloss.Color("#6272A4"))
-	styleWarning    = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF5555"))
-	stylePot        = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#F1FA8C"))
-	styleButton     = lipgloss.NewStyle().Background(lipgloss.Color("#44475A")).Foreground(lipgloss.Color("#F8F8F2")).Padding(0, 2)
-	styleButtonActive = lipgloss.NewStyle().Background(lipgloss.Color("#FF79C6")).Foreground(lipgloss.Color("#F8F8F2")).Padding(0, 2)
-	styleAction     = lipgloss.NewStyle().Foreground(lipgloss.Color("#8BE9FD"))
-	styleChat       = lipgloss.NewStyle().Foreground(lipgloss.Color("#BD93F9"))
+	// 标题样式
+	styleTitle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("228")). // 亮黄色
+			Align(lipgloss.Center)
+
+	// 副标题样式
+	styleSubtitle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("241")). // 灰色
+			Faint(true)
+
+	// 边框样式
+	styleBox = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("240")).
+			Padding(1)
+
+	// 激活状态样式
+	styleActive = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("50")). // 亮绿色
+			Bold(true)
+
+	// 非激活状态样式
+	styleInactive = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("242")). // 暗灰色
+			Faint(true)
+
+	// 警告样式
+	styleWarning = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("196")). // 红色
+			Bold(true)
+
+	// 错误样式
+	styleError = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("160")). // 深红色
+			Bold(true)
+
+	// 底池样式
+	stylePot = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("226")) // 黄色
+
+	// 按钮样式
+	styleButton = lipgloss.NewStyle().
+			Background(lipgloss.Color("237")). // 深灰色
+			Foreground(lipgloss.Color("15")).  // 白色
+			Padding(0, 2)
+
+	// 激活按钮样式
+	styleButtonActive = lipgloss.NewStyle().
+				Background(lipgloss.Color("57")).  // 紫色
+				Foreground(lipgloss.Color("15")). // 白色
+				Padding(0, 2)
+
+	// 输入框样式
+	styleInput = lipgloss.NewStyle().
+			Background(lipgloss.Color("235")). // 暗灰色
+			Foreground(lipgloss.Color("15")).  // 白色
+			Padding(0, 1)
+
+	// 动作提示样式
+	styleAction = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("81")). // 青色
+			Bold(true)
+
+	// 当前玩家高亮样式
+	styleCurrentPlayer = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("228")). // 亮黄色
+				Bold(true)
+
+	// 高亮样式
+	styleHighlight = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("214")). // 橙色
+			Bold(true)
 )
 
-// ScreenType 表示当前屏幕
+// ==================== 屏幕类型定义 ====================
+
+// ScreenType 表示当前屏幕类型
 type ScreenType int
 
 const (
-	ScreenConnect ScreenType = iota
-	ScreenLobby
-	ScreenGame
-	ScreenAction
-	ScreenChat
+	ScreenConnect ScreenType = iota // 连接屏幕
+	ScreenLobby                    // 大厅屏幕
+	ScreenGame                     // 游戏屏幕
+	ScreenAction                   // 动作输入屏幕
+	ScreenShowdown                 // 摊牌结果屏幕
+	ScreenChat                     // 聊天屏幕
 )
 
-// Model TUI 模型
+// String 返回屏幕类型的字符串表示
+func (s ScreenType) String() string {
+	names := []string{"连接", "大厅", "游戏", "动作", "摊牌", "聊天"}
+	if int(s) < len(names) {
+		return names[s]
+	}
+	return "未知"
+}
+
+// ==================== TUI 模型 ====================
+
+// Model TUI 主模型
 type Model struct {
-	client       *client.Client
-	screen       ScreenType
-	gameState    *protocol.GameState
-	playerID     string
-	playerName   string
-	serverURL    string
-	actionAmount int
-	chatInput    string
-	messages     []string
-	selectedMenu int
-	err          error
-	connected    bool
+	// 客户端连接
+	client *client.Client
+
+	// 当前屏幕
+	screen ScreenType
+
+	// 连接屏幕输入
+	serverInput  string // 服务器地址输入
+	playerInput  string // 玩家名称输入
+	connectField int    // 当前聚焦的输入框 (0=服务器, 1=玩家)
+	connecting   bool   // 是否正在连接
+
+	// 游戏状态
+	gameState  *protocol.GameState // 游戏状态
+	playerID   string              // 玩家 ID
+	playerName string              // 玩家名称
+	serverURL  string              // 服务器地址
+
+	// 动作输入
+	actionInput   string // 加注金额输入
+	minRaise      int    // 最小加注金额
+	maxRaise      int    // 最大加注金额
+	currentBet    int    // 当前最高下注
+	isYourTurn    bool   // 是否轮到玩家
+	timeLeft      int    // 剩余时间
+
+	// 摊牌结果
+	showdown *protocol.Showdown // 摊牌结果
+
+	// 聊天
+	chatModel *components.ChatModel // 聊天组件
+
+	// 通知消息
+	notifications []string // 通知消息列表
+
+	// 错误
+	err error // 错误信息
+
+	// 连接状态
+	connected bool // 是否已连接
+
+	// 外部消息通道（用于从 WebSocket 回调接收消息）
+	extMsgChan chan tea.Msg // 外部消息通道
 }
 
 // NewModel 创建新的 TUI 模型
 func NewModel() *Model {
+	// 创建聊天组件
+	chat := components.NewChatModel()
+
 	return &Model{
-		screen:     ScreenConnect,
-		messages:   make([]string, 0),
-		actionAmount: 0,
+		screen:         ScreenConnect,
+		serverInput:    "localhost:8080",
+		playerInput:    "Player",
+		connectField:   0,
+		connecting:     false,
+		actionInput:    "",
+		notifications:  make([]string, 0),
+		chatModel:      chat,
+		connected:      false,
+		extMsgChan:     make(chan tea.Msg, 100), // 缓冲通道
 	}
 }
 
-// Init 初始化
+// ==================== Bubble Tea 接口实现 ====================
+
+// Init 初始化模型
 func (m *Model) Init() tea.Cmd {
-	return nil
+	// 启动一个协程监听外部消息通道
+	return m.waitForExtMsg()
 }
 
-// Update 更新模型
+// waitForExtMsg 等待外部消息
+func (m *Model) waitForExtMsg() tea.Cmd {
+	return func() tea.Msg {
+		return <-m.extMsgChan
+	}
+}
+
+// Update 更新模型状态
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch m.screen {
-	case ScreenConnect:
-		return m.updateConnect(msg)
-
-	case ScreenLobby:
-		return m.updateLobby(msg)
-
-	case ScreenGame:
-		return m.updateGame(msg)
-
-	case ScreenAction:
-		return m.updateAction(msg)
-
-	case ScreenChat:
-		return m.updateChat(msg)
-	}
-
-	return m, nil
-}
-
-// updateConnect 更新连接屏幕
-func (m *Model) updateConnect(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		switch msg.String() {
-		case "ctrl+c":
-			return m, tea.Quit
-
-		case "enter":
-			// 尝试连接
-			m.client = client.NewClient(&client.Config{
-				ServerURL:  m.serverURL,
-				PlayerName: m.playerName,
-				OnConnect: func() {
-					m.connected = true
-				},
-				OnDisconnect: func() {
-					m.connected = false
-				},
-				OnError: func(err error) {
-					m.err = err
-				},
-			})
-			if err := m.client.Connect(); err != nil {
-				m.err = err
-			} else {
-				m.screen = ScreenLobby
-			}
-
-		case "backspace":
-			if len(m.playerName) > 0 {
-				m.playerName = m.playerName[:len(m.playerName)-1]
-			}
-		default:
-			if len(msg.Runes) > 0 {
-				m.playerName += string(msg.Runes[0])
-			}
+	// 先处理聊天组件更新（如果聊天可见）
+	if m.screen == ScreenChat {
+		var cmd tea.Cmd
+		m.chatModel, cmd = m.chatModel.Update(msg)
+		if cmd != nil {
+			return m, tea.Batch(cmd, m.waitForExtMsg())
 		}
 	}
 
-	return m, nil
-}
-
-// updateLobby 更新大厅屏幕
-func (m *Model) updateLobby(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// 处理不同类型的消息
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		switch msg.String() {
-		case "ctrl+c":
-			return m, tea.Quit
+		return m.handleKeyMsg(msg)
 
-		case "enter":
-			m.screen = ScreenGame
+	case tea.WindowSizeMsg:
+		// 窗口大小变化，可以更新组件尺寸
+		return m, nil
 
-		case "c":
-			m.screen = ScreenChat
+	// 服务器消息
+	case ConnectedMsg:
+		m.connected = true
+		m.connecting = false
+		return m, m.waitForExtMsg()
+
+	case DisconnectedMsg:
+		m.connected = false
+		m.connecting = false
+		m.err = fmt.Errorf("与服务器断开连接")
+		m.screen = ScreenConnect
+		return m, m.waitForExtMsg()
+
+	case JoinAckResultMsg:
+		if msg.Success {
+			m.playerID = msg.PlayerID
+			m.addNotification(fmt.Sprintf("加入成功! 座位: %d", msg.Seat+1))
+			m.screen = ScreenLobby
+		} else {
+			m.connecting = false
+			m.err = fmt.Errorf("加入游戏失败")
 		}
+		return m, m.waitForExtMsg()
+
+	case GameStateMsg:
+		m.gameState = msg.State
+		// 如果在摊牌屏幕，收到新游戏状态则返回游戏屏幕
+		if m.screen == ScreenShowdown {
+			m.screen = ScreenGame
+		}
+		return m, m.waitForExtMsg()
+
+	case YourTurnMsg:
+		m.isYourTurn = true
+		m.currentBet = msg.Turn.CurrentBet
+		m.minRaise = msg.Turn.MinAction
+		m.maxRaise = msg.Turn.MaxAction
+		m.timeLeft = msg.Turn.TimeLeft
+		m.addNotification("轮到你行动了!")
+		return m, m.waitForExtMsg()
+
+	case PlayerJoinedMsg:
+		m.addNotification(fmt.Sprintf("玩家 %s 加入了游戏 (座位 %d)",
+			msg.Player.Name, msg.Player.Seat+1))
+		return m, m.waitForExtMsg()
+
+	case PlayerLeftMsg:
+		m.addNotification(fmt.Sprintf("玩家 %s 离开了游戏", msg.PlayerName))
+		return m, m.waitForExtMsg()
+
+	case PlayerActedMsg:
+		actionText := getActionText(msg.Action)
+		if msg.Amount > 0 {
+			m.addNotification(fmt.Sprintf("%s %s %d", msg.PlayerName, actionText, msg.Amount))
+		} else {
+			m.addNotification(fmt.Sprintf("%s %s", msg.PlayerName, actionText))
+		}
+		return m, m.waitForExtMsg()
+
+	case ShowdownMsg:
+		m.showdown = msg.Showdown
+		m.isYourTurn = false
+		m.screen = ScreenShowdown
+		return m, m.waitForExtMsg()
+
+	case ChatMsg:
+		// 添加聊天消息
+		if msg.Message.IsSystem {
+			m.chatModel.AddSystemMessage(msg.Message.Content)
+		} else {
+			m.chatModel.AddMessage(msg.Message.PlayerID, msg.Message.PlayerName, msg.Message.Content)
+		}
+		return m, m.waitForExtMsg()
+
+	case ErrorMsg:
+		m.err = msg.Err
+		return m, m.waitForExtMsg()
 	}
 
-	return m, nil
-}
-
-// updateGame 更新游戏屏幕
-func (m *Model) updateGame(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		switch msg.String() {
-		case "ctrl+c":
-			return m, tea.Quit
-
-		case "f": // Fold
-			m.fold()
-
-		case "c": // Check/Call
-			m.call()
-
-		case "r": // Raise
-			m.screen = ScreenAction
-
-		case "a": // All-in
-			m.allIn()
-
-		case "h": // Chat
-			m.screen = ScreenChat
-		}
-	}
-
-	return m, nil
-}
-
-// updateAction 更新动作屏幕
-func (m *Model) updateAction(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		switch msg.String() {
-		case "ctrl+c":
-			return m, tea.Quit
-
-		case "enter":
-			m.raise()
-			m.screen = ScreenGame
-
-		case "esc":
-			m.screen = ScreenGame
-
-		case "backspace":
-			if len(m.chatInput) > 0 {
-				m.chatInput = m.chatInput[:len(m.chatInput)-1]
-			}
-
-		default:
-			if len(msg.Runes) > 0 {
-				m.chatInput += string(msg.Runes[0])
-			}
-		}
-	}
-
-	return m, nil
-}
-
-// updateChat 更新聊天屏幕
-func (m *Model) updateChat(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		switch msg.String() {
-		case "ctrl+c":
-			return m, tea.Quit
-
-		case "enter":
-			m.sendChat()
-			m.screen = ScreenGame
-
-		case "esc":
-			m.screen = ScreenGame
-
-		case "backspace":
-			if len(m.chatInput) > 0 {
-				m.chatInput = m.chatInput[:len(m.chatInput)-1]
-			}
-
-		default:
-			if len(msg.Runes) > 0 {
-				m.chatInput += string(msg.Runes[0])
-			}
-		}
-	}
-
-	return m, nil
+	// 默认继续等待外部消息
+	return m, m.waitForExtMsg()
 }
 
 // View 渲染视图
@@ -243,217 +306,736 @@ func (m *Model) View() string {
 	switch m.screen {
 	case ScreenConnect:
 		return m.viewConnect()
-
 	case ScreenLobby:
 		return m.viewLobby()
-
 	case ScreenGame:
 		return m.viewGame()
-
 	case ScreenAction:
 		return m.viewAction()
-
+	case ScreenShowdown:
+		return m.viewShowdown()
 	case ScreenChat:
 		return m.viewChat()
+	default:
+		return "未知屏幕"
 	}
-
-	return ""
 }
 
-// viewConnect 渲染连接屏幕
-func (m *Model) viewConnect() string {
-	content := styleTitle.Render("Texas Hold'em Poker") + "\n\n"
-	content += styleSubtitle.Render("请输入您的名称:") + "\n\n"
-	content += styleButtonActive.Render(" "+m.playerName+" ")
+// ==================== 键盘消息处理 ====================
 
-	if m.err != nil {
-		content += "\n\n" + styleWarning.Render(fmt.Sprintf("错误: %v", m.err))
+// handleKeyMsg 处理键盘消息
+func (m *Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// 全局快捷键
+	if msg.String() == "ctrl+c" {
+		return m, tea.Quit
 	}
 
-	content += "\n\n按 Enter 连接，按 Ctrl+C 退出"
+	// 根据当前屏幕分发处理
+	switch m.screen {
+	case ScreenConnect:
+		return m.updateConnect(msg)
+	case ScreenLobby:
+		return m.updateLobby(msg)
+	case ScreenGame:
+		return m.updateGame(msg)
+	case ScreenAction:
+		return m.updateAction(msg)
+	case ScreenShowdown:
+		return m.updateShowdown(msg)
+	case ScreenChat:
+		return m.updateChat(msg)
+	}
 
-	return content
+	return m, nil
 }
 
-// viewLobby 渲染大厅屏幕
-func (m *Model) viewLobby() string {
-	content := styleTitle.Render("等待游戏开始...") + "\n\n"
+// ==================== 连接屏幕 ====================
 
-	if m.client != nil && m.client.PlayerID() != "" {
-		content += styleSubtitle.Render(fmt.Sprintf("您的 ID: %s", m.client.PlayerID())) + "\n"
-	}
-
-	if m.gameState != nil {
-		content += fmt.Sprintf("\n已连接玩家: %d/%d", len(m.gameState.Players), 9)
-	}
-
-	content += "\n\n按 Enter 进入游戏，按 C 进入聊天"
-
-	return content
-}
-
-// viewGame 渲染游戏屏幕
-func (m *Model) viewGame() string {
-	var content string
-
-	// 标题
-	content += styleTitle.Render("Texas Hold'em Poker") + "\n"
-
-	// 游戏状态
-	stage := "等待开始"
-	if m.gameState != nil {
-		stage = m.gameState.Stage.String()
-	}
-	content += styleSubtitle.Render("当前阶段: ") + styleActive.Render(stage) + "\n"
-
-	// 底池
-	pot := 0
-	if m.gameState != nil {
-		pot = m.gameState.Pot
-	}
-	content += stylePot.Render(fmt.Sprintf("底池: %d", pot)) + "\n\n"
-
-	// 公共牌
-	content += m.renderCommunityCards() + "\n\n"
-
-	// 玩家列表
-	content += m.renderPlayers() + "\n"
-
-	// 动作提示
-	content += m.renderActionPrompt()
-
-	// 聊天消息
-	if len(m.messages) > 0 {
-		content += "\n" + styleChat.Render("最近消息:")
-		for _, msg := range m.messages {
-			content += "\n" + styleInactive.Render(msg)
+// updateConnect 更新连接屏幕
+func (m *Model) updateConnect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "enter":
+		// 尝试连接
+		if !m.connecting {
+			m.connecting = true
+			m.err = nil
+			cmd := m.doConnect()
+			return m, cmd
 		}
-	}
 
-	return content
-}
+	case "tab":
+		// 切换输入框
+		m.connectField = (m.connectField + 1) % 2
+		return m, nil
 
-// viewAction 渲染动作屏幕
-func (m *Model) viewAction() string {
-	content := styleTitle.Render("下注金额") + "\n\n"
-	content += styleSubtitle.Render("输入下注金额:") + "\n\n"
-	content += styleButtonActive.Render(" "+m.chatInput+" ") + "\n\n"
-	content += styleSubtitle.Render("按 Enter 确认，按 Esc 返回")
+	case "up", "shift+tab":
+		// 上一个输入框
+		m.connectField = (m.connectField - 1 + 2) % 2
+		return m, nil
 
-	return content
-}
+	case "backspace":
+		// 删除字符
+		if m.connectField == 0 {
+			if len(m.serverInput) > 0 {
+				m.serverInput = m.serverInput[:len(m.serverInput)-1]
+			}
+		} else {
+			if len(m.playerInput) > 0 {
+				m.playerInput = m.playerInput[:len(m.playerInput)-1]
+			}
+		}
+		return m, nil
 
-// viewChat 渲染聊天屏幕
-func (m *Model) viewChat() string {
-	content := styleTitle.Render("聊天") + "\n\n"
-	content += styleSubtitle.Render("输入消息:") + "\n\n"
-	content += styleButtonActive.Render(" "+m.chatInput+" ") + "\n\n"
-	content += styleSubtitle.Render("按 Enter 发送，按 Esc 返回")
-
-	return content
-}
-
-// renderCommunityCards 渲染公共牌
-func (m *Model) renderCommunityCards() string {
-	cards := make([]string, 0)
-
-	if m.gameState != nil {
-		for _, c := range m.gameState.CommunityCards {
-			if c.Rank != 0 {
-				cards = append(cards, renderCard(c))
+	default:
+		// 输入字符
+		if len(msg.Runes) > 0 {
+			ch := msg.Runes[0]
+			if m.connectField == 0 {
+				// 服务器地址输入
+				m.serverInput += string(ch)
+			} else {
+				// 玩家名称输入
+				if len(m.playerInput) < 20 { // 限制长度
+					m.playerInput += string(ch)
+				}
 			}
 		}
 	}
 
-	if len(cards) == 0 {
-		cards = []string{"[  ?  ]", "[  ?  ]", "[  ?  ]"}
+	return m, nil
+}
+
+// doConnect 执行连接
+func (m *Model) doConnect() tea.Cmd {
+	// 创建客户端配置
+	config := &client.Config{
+		ServerURL:   "ws://" + m.serverInput,
+		PlayerName:  m.playerInput,
+		OnJoinAck: func(success bool, playerID string, seat int) {
+			// 加入确认回调
+			m.extMsgChan <- JoinAckResultMsg{
+				Success:  success,
+				PlayerID: playerID,
+				Seat:     seat,
+			}
+		},
+		OnStateChange: func(state *protocol.GameState) {
+			// 通过通道发送消息到 Bubble Tea
+			m.extMsgChan <- GameStateMsg{State: state}
+		},
+		OnTurn: func(turn *protocol.YourTurn) {
+			m.extMsgChan <- YourTurnMsg{Turn: turn}
+		},
+		OnChat: func(chatMsg *protocol.ChatMessage) {
+			m.extMsgChan <- ChatMsg{Message: chatMsg}
+		},
+		OnError: func(err error) {
+			m.extMsgChan <- ErrorMsg{Err: err}
+		},
+		OnConnect: func() {
+			m.extMsgChan <- ConnectedMsg{}
+		},
+		OnDisconnect: func() {
+			m.extMsgChan <- DisconnectedMsg{}
+		},
 	}
 
-	return styleSubtitle.Render("公共牌: ") + lipgloss.JoinHorizontal(lipgloss.Center, cards...)
+	// 创建客户端
+	m.client = client.NewClient(config)
+	m.serverURL = config.ServerURL
+	m.playerName = config.PlayerName
+
+	// 返回一个 Cmd 执行连接
+	return func() tea.Msg {
+		if err := m.client.Connect(); err != nil {
+			m.connecting = false
+			return ErrorMsg{Err: err}
+		}
+		return nil
+	}
+}
+
+// viewConnect 渲染连接屏幕
+func (m *Model) viewConnect() string {
+	var content strings.Builder
+
+	// 标题
+	content.WriteString(styleTitle.Render("Texas Hold'em Poker"))
+	content.WriteString("\n\n")
+
+	// 服务器地址输入框
+	serverLabel := "服务器地址:"
+	if m.connectField == 0 {
+		serverLabel = styleActive.Render(serverLabel)
+	} else {
+		serverLabel = styleInactive.Render(serverLabel)
+	}
+	serverInput := m.serverInput
+	if m.connectField == 0 {
+		serverInput = styleInput.Render(serverInput + " ")
+	} else {
+		serverInput = styleInput.Render(serverInput)
+	}
+	content.WriteString(fmt.Sprintf("%s %s\n\n", serverLabel, serverInput))
+
+	// 玩家名称输入框
+	playerLabel := "玩家名称:"
+	if m.connectField == 1 {
+		playerLabel = styleActive.Render(playerLabel)
+	} else {
+		playerLabel = styleInactive.Render(playerLabel)
+	}
+	playerInput := m.playerInput
+	if m.connectField == 1 {
+		playerInput = styleInput.Render(playerInput + " ")
+	} else {
+		playerInput = styleInput.Render(playerInput)
+	}
+	content.WriteString(fmt.Sprintf("%s %s\n\n", playerLabel, playerInput))
+
+	// 连接状态
+	if m.connecting {
+		content.WriteString(styleSubtitle.Render("正在连接..."))
+	} else if m.err != nil {
+		content.WriteString(styleError.Render(fmt.Sprintf("错误: %v", m.err)))
+	} else {
+		content.WriteString(styleSubtitle.Render("按 Enter 连接，Tab 切换输入框"))
+	}
+	content.WriteString("\n\n")
+
+	// 底部提示
+	content.WriteString(styleInactive.Render("Ctrl+C: 退出"))
+
+	return lipgloss.Place(
+		60, 20,
+		lipgloss.Center, lipgloss.Center,
+		styleBox.Render(content.String()),
+	)
+}
+
+// ==================== 大厅屏幕 ====================
+
+// updateLobby 更新大厅屏幕
+func (m *Model) updateLobby(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "enter":
+		// 进入游戏（实际上游戏由服务器控制）
+		m.addNotification("等待游戏开始...")
+		return m, m.waitForExtMsg()
+
+	case "h":
+		// 打开聊天
+		m.chatModel.SetVisible(true)
+		m.screen = ScreenChat
+		return m, m.waitForExtMsg()
+	}
+
+	return m, m.waitForExtMsg()
+}
+
+// viewLobby 渲染大厅屏幕
+func (m *Model) viewLobby() string {
+	var content strings.Builder
+
+	// 标题
+	content.WriteString(styleTitle.Render("Texas Hold'em Poker"))
+	content.WriteString("\n\n")
+
+	// 玩家信息
+	content.WriteString(styleSubtitle.Render("玩家信息"))
+	content.WriteString("\n")
+	content.WriteString(fmt.Sprintf("  ID: %s\n", m.playerID))
+	content.WriteString(fmt.Sprintf("  名称: %s\n", m.playerName))
+	content.WriteString("\n")
+
+	// 游戏状态
+	if m.gameState != nil && len(m.gameState.Players) > 0 {
+		content.WriteString(styleSubtitle.Render("已连接玩家:"))
+		content.WriteString("\n")
+		for _, p := range m.gameState.Players {
+			status := "游戏中"
+			if p.Status == models.PlayerStatusInactive {
+				status = "未入座"
+			}
+			marker := " "
+			if p.ID == m.playerID {
+				marker = "★"
+			}
+			content.WriteString(fmt.Sprintf("  %s [%d] %s - %s\n",
+				marker, p.Seat+1, p.Name, status))
+		}
+	} else {
+		content.WriteString(styleInactive.Render("等待其他玩家加入..."))
+	}
+	content.WriteString("\n")
+
+	// 提示
+	content.WriteString(styleSubtitle.Render("等待游戏开始..."))
+	content.WriteString("\n\n")
+
+	// 快捷键提示
+	content.WriteString(styleInactive.Render("[H] 聊天  [Ctrl+C] 退出"))
+
+	return lipgloss.Place(
+		60, 25,
+		lipgloss.Center, lipgloss.Center,
+		styleBox.Render(content.String()),
+	)
+}
+
+// ==================== 游戏屏幕 ====================
+
+// updateGame 更新游戏屏幕
+func (m *Model) updateGame(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "f":
+		// 弃牌
+		return m, m.sendAction(models.ActionFold, 0)
+
+	case "c":
+		// 跟注/看牌
+		return m, m.sendAction(models.ActionCall, 0)
+
+	case "r":
+		// 加注
+		if m.isYourTurn {
+			m.actionInput = ""
+			m.screen = ScreenAction
+		} else {
+			m.addNotification("还没轮到你")
+		}
+		return m, nil
+
+	case "a":
+		// 全下
+		return m, m.sendAction(models.ActionAllIn, 0)
+
+	case "h":
+		// 聊天
+		m.chatModel.SetVisible(true)
+		m.screen = ScreenChat
+		return m, nil
+
+	case "q":
+		// 退出
+		return m, tea.Quit
+	}
+
+	return m, nil
+}
+
+// sendAction 发送玩家动作
+func (m *Model) sendAction(action models.ActionType, amount int) tea.Cmd {
+	return func() tea.Msg {
+		if err := m.client.SendPlayerAction(action, amount); err != nil {
+			return ErrorMsg{Err: err}
+		}
+		m.isYourTurn = false
+		return nil
+	}
+}
+
+// viewGame 渲染游戏屏幕
+func (m *Model) viewGame() string {
+	var content strings.Builder
+
+	// 标题栏
+	title := styleTitle.Render("Texas Hold'em Poker")
+	playerInfo := styleSubtitle.Render(fmt.Sprintf("玩家: %s", m.playerName))
+	content.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, title, "    ", playerInfo))
+	content.WriteString("\n")
+
+	// 游戏状态行
+	if m.gameState != nil {
+		stage := m.gameState.Stage.String()
+		pot := stylePot.Render(fmt.Sprintf("底池: %d", m.gameState.Pot))
+		dealer := fmt.Sprintf("庄家: [%d]", m.gameState.DealerButton+1)
+
+		content.WriteString(styleBox.Render(
+			lipgloss.JoinHorizontal(lipgloss.Top,
+				fmt.Sprintf(" 阶段: %s ", stage),
+				"    ",
+				pot,
+				"    ",
+				dealer,
+			),
+		))
+		content.WriteString("\n\n")
+	}
+
+	// 公共牌
+	content.WriteString(m.renderCommunityCards())
+	content.WriteString("\n\n")
+
+	// 玩家列表
+	content.WriteString(m.renderPlayers())
+	content.WriteString("\n")
+
+	// 通知消息
+	if len(m.notifications) > 0 {
+		content.WriteString(styleSubtitle.Render("────────────────────────────────────"))
+		content.WriteString("\n")
+		for _, msg := range m.notifications {
+			content.WriteString(styleHighlight.Render("  " + msg))
+			content.WriteString("\n")
+		}
+		// 清空通知
+		m.notifications = make([]string, 0)
+	}
+
+	// 动作提示
+	content.WriteString("\n")
+	content.WriteString(m.renderActionPrompt())
+
+	return content.String()
+}
+
+// renderCommunityCards 渲染公共牌
+func (m *Model) renderCommunityCards() string {
+	if m.gameState == nil {
+		return styleSubtitle.Render("公共牌: 等待发牌")
+	}
+
+	var cards []card.Card
+	for _, c := range m.gameState.CommunityCards {
+		if c.Rank != 0 {
+			cards = append(cards, c)
+		}
+	}
+
+	if len(cards) == 0 {
+		return styleSubtitle.Render("公共牌: [  ?  ] [  ?  ] [  ?  ] [  ?  ] [  ?  ]")
+	}
+
+	return styleSubtitle.Render("公共牌: ") + components.RenderCardsCompact(cards, true)
 }
 
 // renderPlayers 渲染玩家列表
 func (m *Model) renderPlayers() string {
 	if m.gameState == nil || len(m.gameState.Players) == 0 {
-		return styleSubtitle.Render("等待玩家加入...") + "\n"
+		return styleSubtitle.Render("玩家: 等待加入...")
 	}
 
-	var players []string
+	var parts []string
+	parts = append(parts, styleSubtitle.Render("玩家:"))
+	parts = append(parts, "\n")
+
 	for _, p := range m.gameState.Players {
-		isSelf := p.ID == m.playerID
-		nameStyle := styleInactive
-		if isSelf {
-			nameStyle = styleActive
+		// 玩家状态
+		status := ""
+		switch p.Status {
+		case models.PlayerStatusActive:
+			if p.IsSelf {
+				status = styleActive.Render("【你】")
+			} else {
+				status = styleInactive.Render("    ")
+			}
+		case models.PlayerStatusFolded:
+			status = styleInactive.Render("已弃牌")
+		case models.PlayerStatusAllIn:
+			status = styleHighlight.Render("全下  ")
+		default:
+			status = styleInactive.Render("    ")
 		}
 
-		var holeCards string
-		if isSelf && p.HoleCards[0].Rank != 0 {
-			holeCards = renderCard(p.HoleCards[0]) + " " + renderCard(p.HoleCards[1])
+		// 是否当前玩家
+		current := ""
+		if m.gameState != nil && m.gameState.CurrentPlayer == p.Seat {
+			current = styleCurrentPlayer.Render("◀")
+		}
+
+		// 是否庄家
+		dealer := ""
+		if p.IsDealer {
+			dealer = "[D]"
+		}
+
+		// 玩家信息行
+		line := fmt.Sprintf("  [%d] %s %-10s 筹码:%-4d 下注:%-3d %s %s",
+			p.Seat+1, dealer, p.Name, p.Chips, p.CurrentBet, status, current)
+		parts = append(parts, line)
+
+		// 底牌行
+		if p.IsSelf && p.HoleCards[0].Rank != 0 {
+			holeCards := components.RenderCardsCompact(p.HoleCards[:], true)
+			parts = append(parts, fmt.Sprintf("      底牌: %s", holeCards))
+		} else if p.HoleCards[0].Rank != 0 {
+			// 其他玩家的底牌（只在摊牌时显示）
+			holeCards := components.RenderCardsCompact(p.HoleCards[:], true)
+			parts = append(parts, fmt.Sprintf("      底牌: %s", holeCards))
 		} else {
-			holeCards = "[  ?  ] [  ?  ]"
+			parts = append(parts, "      底牌: [??] [??]")
 		}
-
-		playerStr := fmt.Sprintf("%s | 筹码: %d | 下注: %d | %s",
-			nameStyle.Render(p.Name), p.Chips, p.CurrentBet, p.Status.String())
-		players = append(players, playerStr)
-		players = append(players, "    "+holeCards)
+		parts = append(parts, "\n")
 	}
 
-	return styleSubtitle.Render("玩家:") + "\n" + lipgloss.JoinVertical(lipgloss.Left, players...)
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("240")).
+		Padding(1).
+		Render(lipgloss.JoinVertical(lipgloss.Left, parts...))
 }
 
 // renderActionPrompt 渲染动作提示
 func (m *Model) renderActionPrompt() string {
 	var actions []string
-	actions = append(actions, styleAction.Render("[F]old 弃牌"))
-	actions = append(actions, styleAction.Render("[C]all 跟注"))
-	actions = append(actions, styleAction.Render("[R]aise 加注"))
-	actions = append(actions, styleAction.Render("[A]ll-in 全下"))
-	actions = append(actions, styleAction.Render("[H]elp 帮助"))
 
-	return "\n" + lipgloss.JoinHorizontal(lipgloss.Center, actions...)
+	if m.isYourTurn {
+		actions = append(actions, styleAction.Render("[F] 弃牌"))
+		actions = append(actions, styleAction.Render("[C] 跟注"))
+		actions = append(actions, styleAction.Render("[R] 加注"))
+		actions = append(actions, styleAction.Render("[A] 全下"))
+	} else {
+		actions = append(actions, styleInactive.Render("[F] 弃牌"))
+		actions = append(actions, styleInactive.Render("[C] 跟注"))
+		actions = append(actions, styleInactive.Render("[R] 加注"))
+		actions = append(actions, styleInactive.Render("[A] 全下"))
+	}
+
+	actions = append(actions, styleAction.Render("[H] 聊天"))
+	actions = append(actions, styleAction.Render("[Q] 退出"))
+
+	return lipgloss.JoinHorizontal(lipgloss.Center, actions...)
 }
 
-// renderCard 渲染单张牌
-func renderCard(card interface{ String() string }) string {
-	return card.String()
+// ==================== 动作屏幕 ====================
+
+// updateAction 更新动作屏幕
+func (m *Model) updateAction(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "enter":
+		// 确认加注
+		var amount int
+		fmt.Sscanf(m.actionInput, "%d", &amount)
+		if amount > 0 {
+			m.screen = ScreenGame
+			return m, m.sendAction(models.ActionRaise, amount)
+		}
+		return m, nil
+
+	case "esc":
+		// 取消
+		m.screen = ScreenGame
+		return m, nil
+
+	case "backspace":
+		// 删除字符
+		if len(m.actionInput) > 0 {
+			m.actionInput = m.actionInput[:len(m.actionInput)-1]
+		}
+		return m, nil
+
+	default:
+		// 输入数字
+		if len(msg.Runes) > 0 {
+			ch := msg.Runes[0]
+			if ch >= '0' && ch <= '9' {
+				m.actionInput += string(ch)
+			}
+		}
+	}
+
+	return m, nil
 }
 
-// fold 弃牌
-func (m *Model) fold() {
-	if m.client != nil {
-		m.client.SendPlayerAction(models.ActionFold, 0)
+// viewAction 渲染动作屏幕
+func (m *Model) viewAction() string {
+	var content strings.Builder
+
+	// 标题
+	content.WriteString(styleTitle.Render("加注"))
+	content.WriteString("\n\n")
+
+	// 提示
+	content.WriteString(styleSubtitle.Render("请输入加注金额:"))
+	content.WriteString("\n\n")
+
+	// 输入框
+	content.WriteString(styleButtonActive.Render(" " + m.actionInput + " "))
+	content.WriteString("\n\n")
+
+	// 限制提示
+	if m.minRaise > 0 || m.maxRaise > 0 {
+		content.WriteString(styleSubtitle.Render(fmt.Sprintf("最小: %d  最大: %d", m.minRaise, m.maxRaise)))
+		content.WriteString("\n\n")
+	}
+
+	// 确认提示
+	content.WriteString(styleInactive.Render("[Enter] 确认  [Esc] 取消"))
+
+	return lipgloss.Place(
+		40, 15,
+		lipgloss.Center, lipgloss.Center,
+		styleBox.Render(content.String()),
+	)
+}
+
+// ==================== 摊牌屏幕 ====================
+
+// updateShowdown 更新摊牌屏幕
+func (m *Model) updateShowdown(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "enter", "esc", "q":
+		// 返回游戏屏幕
+		m.screen = ScreenGame
+		return m, nil
+	}
+
+	return m, nil
+}
+
+// viewShowdown 渲染摊牌屏幕
+func (m *Model) viewShowdown() string {
+	var content strings.Builder
+
+	// 标题
+	content.WriteString(styleTitle.Render("摊牌结果"))
+	content.WriteString("\n\n")
+
+	if m.showdown == nil {
+		content.WriteString(styleInactive.Render("等待摊牌..."))
+		return lipgloss.Place(
+			60, 15,
+			lipgloss.Center, lipgloss.Center,
+			styleBox.Render(content.String()),
+		)
+	}
+
+	// 底池
+	content.WriteString(stylePot.Render(fmt.Sprintf("总底池: %d", m.showdown.Pot)))
+	content.WriteString("\n\n")
+
+	// 公共牌
+	if len(m.showdown.CommunityCards) > 0 {
+		var cards []card.Card
+		for _, c := range m.showdown.CommunityCards {
+			if c.Rank != 0 {
+				cards = append(cards, c)
+			}
+		}
+		if len(cards) > 0 {
+			content.WriteString(styleSubtitle.Render("公共牌: "))
+			content.WriteString(components.RenderCardsCompact(cards, true))
+			content.WriteString("\n\n")
+		}
+	}
+
+	// 所有玩家详情
+	content.WriteString(styleSubtitle.Render("玩家详情:"))
+	content.WriteString("\n")
+
+	for _, p := range m.showdown.AllPlayers {
+		// 赢家标记
+		marker := " "
+		if p.IsWinner {
+			marker = styleHighlight.Render("★")
+		}
+
+		if p.IsFolded {
+			// 弃牌玩家
+			content.WriteString(fmt.Sprintf("  %s %-10s [已弃牌]\n", marker, p.PlayerName))
+		} else {
+			// 未弃牌玩家
+			holeCards := components.RenderCardsCompact(p.HoleCards[:], true)
+			handName := p.HandName
+			if handName == "" {
+				handName = "-"
+			}
+			content.WriteString(fmt.Sprintf("  %s %-10s 底牌: %s  牌型: %s\n",
+				marker, p.PlayerName, holeCards, handName))
+		}
+
+		// 筹码变化
+		if p.WonAmount > 0 {
+			content.WriteString(styleActive.Render(fmt.Sprintf("              赢得 +%d (剩余: %d)\n", p.WonAmount, p.ChipsAfter)))
+		} else if p.WonAmount < 0 {
+			content.WriteString(styleInactive.Render(fmt.Sprintf("              输掉 %d (剩余: %d)\n", -p.WonAmount, p.ChipsAfter)))
+		} else {
+			content.WriteString(styleInactive.Render(fmt.Sprintf("              筹码不变 (剩余: %d)\n", p.ChipsAfter)))
+		}
+	}
+
+	content.WriteString("\n")
+
+	// 赢家列表
+	if len(m.showdown.Winners) > 0 {
+		content.WriteString(styleHighlight.Render("赢家:"))
+		content.WriteString("\n")
+		for _, w := range m.showdown.Winners {
+			handName := w.HandName
+			if handName == "" {
+				handName = "高牌"
+			}
+			content.WriteString(styleActive.Render(fmt.Sprintf("  ★ %s 以 [%s] 获胜 +%d\n",
+				w.PlayerName, handName, w.WonChips)))
+		}
+	}
+
+	content.WriteString("\n")
+	content.WriteString(styleInactive.Render("[Enter] 返回游戏"))
+
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("240")).
+		Padding(1).
+		Width(70).
+		Render(content.String())
+}
+
+// ==================== 聊天屏幕 ====================
+
+// updateChat 更新聊天屏幕
+func (m *Model) updateChat(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		// 关闭聊天
+		m.chatModel.SetVisible(false)
+		m.screen = ScreenGame
+		return m, nil
+
+	case "enter":
+		// 发送消息
+		input := m.chatModel.GetInputValue()
+		if input != "" {
+			// 发送聊天消息
+			_ = m.client.SendChat(input)
+			m.chatModel.ClearInput()
+		}
+		return m, nil
+	}
+
+	return m, nil
+}
+
+// viewChat 渲染聊天屏幕
+func (m *Model) viewChat() string {
+	return m.chatModel.View()
+}
+
+// ==================== 辅助方法 ====================
+
+// addNotification 添加通知消息
+func (m *Model) addNotification(msg string) {
+	m.notifications = append(m.notifications, msg)
+	// 限制通知数量
+	if len(m.notifications) > 5 {
+		m.notifications = m.notifications[len(m.notifications)-5:]
 	}
 }
 
-// call 跟注
-func (m *Model) call() {
-	if m.client != nil {
-		m.client.SendPlayerAction(models.ActionCall, 0)
-	}
+// SetClient 设置客户端（用于从 main.go 传入）
+func (m *Model) SetClient(client *client.Client) {
+	m.client = client
 }
 
-// raise 加注
-func (m *Model) raise() {
-	if m.client != nil && m.actionAmount > 0 {
-		m.client.SendPlayerAction(models.ActionRaise, m.actionAmount)
-	}
+// GetClient 获取客户端
+func (m *Model) GetClient() *client.Client {
+	return m.client
 }
 
-// allIn 全下
-func (m *Model) allIn() {
-	if m.client != nil {
-		m.client.SendPlayerAction(models.ActionAllIn, 0)
-	}
-}
-
-// sendChat 发送聊天消息
-func (m *Model) sendChat() {
-	if m.client != nil && m.chatInput != "" {
-		m.client.SendChat(m.chatInput)
-		m.messages = append(m.messages, "你说: "+m.chatInput)
-		m.chatInput = ""
-	}
+// GetExtMsgChan 获取外部消息通道（用于 WebSocket 回调）
+func (m *Model) GetExtMsgChan() chan tea.Msg {
+	return m.extMsgChan
 }
 
 // SetGameState 设置游戏状态
@@ -461,38 +1043,25 @@ func (m *Model) SetGameState(state *protocol.GameState) {
 	m.gameState = state
 }
 
-// SetPlayerID 设置玩家ID
-func (m *Model) SetPlayerID(id string) {
-	m.playerID = id
+// GetGameState 获取游戏状态
+func (m *Model) GetGameState() *protocol.GameState {
+	return m.gameState
 }
 
-// AddMessage 添加消息
-func (m *Model) AddMessage(msg string) {
-	m.messages = append(m.messages, msg)
-	if len(m.messages) > 10 {
-		m.messages = m.messages[len(m.messages)-10:]
+// getActionText 获取动作描述文本
+func getActionText(action models.ActionType) string {
+	switch action {
+	case models.ActionFold:
+		return "弃牌"
+	case models.ActionCheck:
+		return "看牌"
+	case models.ActionCall:
+		return "跟注"
+	case models.ActionRaise:
+		return "加注"
+	case models.ActionAllIn:
+		return "全下"
+	default:
+		return "未知"
 	}
-}
-
-// SetServerURL 设置服务器URL
-func (m *Model) SetServerURL(url string) {
-	m.serverURL = url
-}
-
-// Start 启动 TUI
-func Start() error {
-	model := NewModel()
-
-	// 创建 TUI 程序
-	p := tea.NewProgram(
-		model,
-		tea.WithAltScreen(),
-	)
-
-	// 运行 TUI
-	if _, err := p.Run(); err != nil {
-		return fmt.Errorf("TUI 运行错误: %w", err)
-	}
-
-	return nil
 }

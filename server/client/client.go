@@ -24,6 +24,7 @@ type Client struct {
 	send        chan []byte      // 发送消息通道
 	receive     chan []byte      // 接收消息通道
 	onStateChange func(*protocol.GameState) // 状态变化回调
+	onJoinAck    func(bool, string, int)    // 加入确认回调(success, playerID, seat)
 	onTurn       func(*protocol.YourTurn)   // 轮到玩家回合回调
 	onChat       func(*protocol.ChatMessage) // 收到聊天消息回调
 	onError      func(error)                 // 错误回调
@@ -39,6 +40,7 @@ type Config struct {
 	PlayerName  string               // 玩家名称
 	Seat        int                  // 请求座位号（-1表示随机）
 	OnStateChange func(*protocol.GameState) // 状态变化回调
+	OnJoinAck    func(bool, string, int)    // 加入确认回调(success, playerID, seat)
 	OnTurn       func(*protocol.YourTurn)   // 轮到玩家回合回调
 	OnChat       func(*protocol.ChatMessage) // 收到聊天消息回调
 	OnError      func(error)                 // 错误回调
@@ -54,12 +56,13 @@ func NewClient(config *Config) *Client {
 		send:        make(chan []byte, 256),
 		receive:     make(chan []byte, 256),
 		onStateChange: config.OnStateChange,
-		onTurn:       config.OnTurn,
-		onChat:       config.OnChat,
-		onError:      config.OnError,
-		onConnect:    config.OnConnect,
-		onDisconnect: config.OnDisconnect,
-		done:        make(chan struct{}),
+		onJoinAck:     config.OnJoinAck,
+		onTurn:        config.OnTurn,
+		onChat:        config.OnChat,
+		onError:       config.OnError,
+		onConnect:     config.OnConnect,
+		onDisconnect:  config.OnDisconnect,
+		done:         make(chan struct{}),
 	}
 }
 
@@ -355,9 +358,17 @@ func (c *Client) handleJoinAck(data []byte) {
 	if msg.Success {
 		c.playerID = msg.PlayerID
 		log.Printf("Joined game as %s at seat %d", c.playerID, msg.Seat)
+		// 调用 JoinAck 回调
+		if c.onJoinAck != nil {
+			c.onJoinAck(true, msg.PlayerID, msg.Seat)
+		}
 	} else {
 		log.Printf("Failed to join game: %s", msg.Message)
 		c.notifyError(&GameError{Message: msg.Message})
+		// 调用 JoinAck 回调（失败）
+		if c.onJoinAck != nil {
+			c.onJoinAck(false, "", -1)
+		}
 	}
 }
 
