@@ -91,6 +91,53 @@ var (
 	styleHighlight = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("214")). // 橙色
 			Bold(true)
+
+	// 操作按钮样式 - 弃牌（红色）
+	styleBtnFold = lipgloss.NewStyle().
+			Background(lipgloss.Color("52")).  // 深红背景
+			Foreground(lipgloss.Color("196")). // 红色文字
+			Bold(true).
+			Padding(0, 1)
+
+	// 操作按钮样式 - 过牌/跟注（绿色）
+	styleBtnCall = lipgloss.NewStyle().
+			Background(lipgloss.Color("22")).  // 深绿背景
+			Foreground(lipgloss.Color("46")).  // 绿色文字
+			Bold(true).
+			Padding(0, 1)
+
+	// 操作按钮样式 - 加注（黄色）
+	styleBtnRaise = lipgloss.NewStyle().
+			Background(lipgloss.Color("58")).  // 深黄背景
+			Foreground(lipgloss.Color("226")). // 黄色文字
+			Bold(true).
+			Padding(0, 1)
+
+	// 操作按钮样式 - 全下（紫色）
+	styleBtnAllIn = lipgloss.NewStyle().
+			Background(lipgloss.Color("53")).  // 深紫背景
+			Foreground(lipgloss.Color("213")). // 亮紫文字
+			Bold(true).
+			Padding(0, 1)
+
+	// 操作按钮样式 - 功能键（青色）
+	styleBtnFunc = lipgloss.NewStyle().
+			Background(lipgloss.Color("236")). // 暗灰背景
+			Foreground(lipgloss.Color("81")).   // 青色文字
+			Padding(0, 1)
+
+	// 操作按钮样式 - 禁用状态
+	styleBtnDisabled = lipgloss.NewStyle().
+				Background(lipgloss.Color("235")). // 暗灰背景
+				Foreground(lipgloss.Color("240")). // 灰色文字
+				Faint(true).
+				Padding(0, 1)
+
+	// 操作栏容器样式
+	styleActionBar = lipgloss.NewStyle().
+			Border(lipgloss.NormalBorder(), true, false, false, false). // 仅顶部边框
+			BorderForeground(lipgloss.Color("238")).
+			PaddingTop(1)
 )
 
 // ==================== 屏幕类型定义 ====================
@@ -295,6 +342,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.selfReady = false
 			m.readyPlayers = nil
 		}
+		return m, m.tick()
+
+	case ActionSentMsg:
+		// 动作已成功发送到服务器，重置行动标志
+		// 如果服务器拒绝动作，会重新发送 YourTurn 恢复状态
+		m.isYourTurn = false
 		return m, m.tick()
 
 	case YourTurnMsg:
@@ -726,13 +779,14 @@ func (m *Model) updateGame(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // sendAction 发送玩家动作
+// 发送成功返回 ActionSentMsg，由 Update 中安全地重置 isYourTurn
+// 如果服务器拒绝动作，会重新发送 YourTurn 恢复行动状态
 func (m *Model) sendAction(action models.ActionType, amount int) tea.Cmd {
 	return func() tea.Msg {
 		if err := m.client.SendPlayerAction(action, amount); err != nil {
 			return ErrorMsg{Err: err}
 		}
-		m.isYourTurn = false
-		return nil
+		return ActionSentMsg{}
 	}
 }
 
@@ -877,15 +931,14 @@ func (m *Model) renderPlayers() string {
 		Render(lipgloss.JoinVertical(lipgloss.Left, parts...))
 }
 
-// renderActionPrompt 渲染动作提示
+// renderActionPrompt 渲染动作提示栏
 func (m *Model) renderActionPrompt() string {
-	var actions []string
+	var content strings.Builder
 
 	// 计算玩家需要跟注的金额
 	toCall := 0
 	if m.gameState != nil {
 		for _, p := range m.gameState.Players {
-			// 使用 IsSelf 字段来判断是否是自己
 			if p.IsSelf {
 				toCall = m.gameState.CurrentBet - p.CurrentBet
 				break
@@ -895,33 +948,54 @@ func (m *Model) renderActionPrompt() string {
 
 	// 判断是否可以过牌（无需跟注）
 	canCheck := toCall == 0
+	sep := "  " // 按钮间距
 
 	if m.isYourTurn {
-		actions = append(actions, styleAction.Render("[F] 弃牌"))
+		// 轮到自己，显示状态提示
+		content.WriteString(styleCurrentPlayer.Render("▶ 轮到你行动"))
+		content.WriteString("\n\n")
+
+		// 游戏操作按钮（带颜色区分）
+		var gameActions []string
+		gameActions = append(gameActions, styleBtnFold.Render(" F 弃牌 "))
 		if canCheck {
-			// 可以过牌
-			actions = append(actions, styleAction.Render("[K] 过牌"))
+			gameActions = append(gameActions, styleBtnCall.Render(" K 过牌 "))
 		} else {
-			// 需要跟注
-			actions = append(actions, styleAction.Render(fmt.Sprintf("[C] 跟注 %d", toCall)))
+			gameActions = append(gameActions, styleBtnCall.Render(fmt.Sprintf(" C 跟注 %d ", toCall)))
 		}
-		actions = append(actions, styleAction.Render("[R] 加注"))
-		actions = append(actions, styleAction.Render("[A] 全下"))
+		gameActions = append(gameActions, styleBtnRaise.Render(" R 加注 "))
+		gameActions = append(gameActions, styleBtnAllIn.Render(" A 全下 "))
+		content.WriteString(strings.Join(gameActions, sep))
 	} else {
-		actions = append(actions, styleInactive.Render("[F] 弃牌"))
+		// 未轮到自己，灰色显示
+		content.WriteString(styleInactive.Render("  等待对手行动..."))
+		content.WriteString("\n\n")
+
+		var gameActions []string
+		gameActions = append(gameActions, styleBtnDisabled.Render(" F 弃牌 "))
 		if canCheck {
-			actions = append(actions, styleInactive.Render("[K] 过牌"))
+			gameActions = append(gameActions, styleBtnDisabled.Render(" K 过牌 "))
 		} else {
-			actions = append(actions, styleInactive.Render(fmt.Sprintf("[C] 跟注 %d", toCall)))
+			gameActions = append(gameActions, styleBtnDisabled.Render(fmt.Sprintf(" C 跟注 %d ", toCall)))
 		}
-		actions = append(actions, styleInactive.Render("[R] 加注"))
-		actions = append(actions, styleInactive.Render("[A] 全下"))
+		gameActions = append(gameActions, styleBtnDisabled.Render(" R 加注 "))
+		gameActions = append(gameActions, styleBtnDisabled.Render(" A 全下 "))
+		content.WriteString(strings.Join(gameActions, sep))
 	}
 
-	actions = append(actions, styleAction.Render("[H] 聊天"))
-	actions = append(actions, styleAction.Render("[Q] 退出"))
+	// 功能按钮单独一行
+	content.WriteString("\n\n")
+	funcActions := []string{
+		styleBtnFunc.Render(" H 聊天 "),
+		styleBtnFunc.Render(" Q 退出 "),
+	}
+	content.WriteString(strings.Join(funcActions, sep))
 
-	return lipgloss.JoinHorizontal(lipgloss.Center, actions...)
+	// 快捷键提示
+	content.WriteString("\n")
+	content.WriteString(styleInactive.Render("[↑/↓] 选择  [Enter] 确认  [Q] 退出"))
+
+	return styleActionBar.Render(content.String())
 }
 
 // ==================== 动作屏幕 ====================

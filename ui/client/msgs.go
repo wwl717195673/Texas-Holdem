@@ -73,6 +73,9 @@ type ErrorMsg struct {
 	Err error
 }
 
+// ActionSentMsg 动作已发送消息（表示动作已成功发送到服务器）
+type ActionSentMsg struct{}
+
 // ConnectedMsg 连接成功消息
 type ConnectedMsg struct{}
 

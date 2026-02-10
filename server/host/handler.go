@@ -142,6 +142,20 @@ func (s *Server) handlePlayerAction(client *Client, data []byte) {
 		log.Printf("[动作] 执行失败 | 玩家=%s | 动作=%s | 金额=%d | 错误=%v",
 			client.Name, actionName(req.Action), req.Amount, err)
 		s.sendError(client.ID, err.Error(), 3002)
+
+		// 动作被拒绝，重新发送 YourTurn 通知客户端仍需行动
+		minAction := s.getMinAction(client.ID)
+		maxAction := s.getMaxAction(client.ID)
+		turnMsg := &protocol.YourTurn{
+			BaseMessage: protocol.NewBaseMessage(protocol.MsgTypeYourTurn),
+			PlayerID:    client.ID,
+			MinAction:   minAction,
+			MaxAction:   maxAction,
+			CurrentBet:  beforeState.CurrentBet,
+			TimeLeft:    30,
+		}
+		s.sendToClient(client.ID, turnMsg)
+		log.Printf("[动作] 重发行动通知 | 玩家=%s | 需补=%d | 最大=%d", client.Name, minAction, maxAction)
 		return
 	}
 

@@ -213,20 +213,7 @@ func (e *GameEngine) StartHand() error {
 		return ErrHandInProgress
 	}
 
-	activePlayers := e.getActivePlayers()
-	if len(activePlayers) < 2 {
-		log.Printf("[引擎] StartHand 拒绝 | 活跃玩家不足(需要>=2, 当前=%d)", len(activePlayers))
-		return ErrNotEnoughPlayers
-	}
-
-	// 准备新局
-	e.state.Stage = StagePreFlop
-	e.state.CommunityCards = [5]card.Card{}
-	e.state.Actions = make([]models.PlayerAction, 0)
-	e.state.Pot = 0
-	e.state.SidePots = make([]SidePot, 0)
-
-	// 先重置玩家状态（必须在轮转庄家按钮之前，否则弃牌玩家会被跳过）
+	// 先重置玩家状态（必须在检查活跃玩家数之前，否则上局弃牌/全下的玩家会被误判为不活跃）
 	for _, p := range e.state.Players {
 		p.HoleCards = [2]card.Card{}
 		p.CurrentBet = 0
@@ -238,6 +225,22 @@ func (e *GameEngine) StartHand() error {
 			log.Printf("[引擎] 玩家 %s 筹码为0，标记为弃牌", p.Name)
 		}
 	}
+
+	// 重置后再检查活跃玩家数
+	activePlayers := e.getActivePlayers()
+	if len(activePlayers) < 2 {
+		log.Printf("[引擎] StartHand 拒绝 | 活跃玩家不足(需要>=2, 当前=%d)", len(activePlayers))
+		// 活跃玩家不足，将阶段恢复为等待状态
+		e.state.Stage = StageWaiting
+		return ErrNotEnoughPlayers
+	}
+
+	// 准备新局
+	e.state.Stage = StagePreFlop
+	e.state.CommunityCards = [5]card.Card{}
+	e.state.Actions = make([]models.PlayerAction, 0)
+	e.state.Pot = 0
+	e.state.SidePots = make([]SidePot, 0)
 
 	// 洗牌
 	e.deck = card.NewDeck()
