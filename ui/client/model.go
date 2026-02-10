@@ -92,6 +92,71 @@ var (
 			Foreground(lipgloss.Color("214")). // 橙色
 			Bold(true)
 
+	// 庄家标记样式
+	styleDealer = lipgloss.NewStyle().
+			Background(lipgloss.Color("226")). // 黄色背景
+			Foreground(lipgloss.Color("0")).    // 黑色文字
+			Bold(true).
+			Padding(0, 0)
+
+	// 玩家卡片样式 - 默认
+	stylePlayerCard = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("240")).
+				Padding(0, 1).
+				Width(30)
+
+	// 玩家卡片样式 - 自己
+	stylePlayerCardSelf = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("50")). // 绿色边框
+				Padding(0, 1).
+				Width(30)
+
+	// 玩家卡片样式 - 当前行动
+	stylePlayerCardActive = lipgloss.NewStyle().
+				Border(lipgloss.DoubleBorder()).
+				BorderForeground(lipgloss.Color("228")). // 黄色边框
+				Padding(0, 1).
+				Width(30)
+
+	// 玩家卡片样式 - 已弃牌
+	stylePlayerCardFolded = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("236")). // 暗灰边框
+				Padding(0, 1).
+				Width(30)
+
+	// 公共牌区域样式
+	styleCommunityArea = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("35")). // 青绿色边框
+				Padding(0, 2).
+				Align(lipgloss.Center)
+
+	// 公共牌占位符样式
+	styleCardPlaceholder = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("238")). // 暗灰色
+				Faint(true)
+
+	// 公共牌分隔符样式
+	styleCardSeparator = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("240"))
+
+	// 阶段标签样式映射（通过函数获取不同阶段颜色）
+
+	// 状态栏底池大号样式
+	stylePotLarge = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("226")). // 黄色
+			Background(lipgloss.Color("58")).   // 深黄背景
+			Padding(0, 1)
+
+	// 通知样式
+	styleNotification = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("81")). // 青色
+				Italic(true)
+
 	// 操作按钮样式 - 弃牌（红色）
 	styleBtnFold = lipgloss.NewStyle().
 			Background(lipgloss.Color("52")).  // 深红背景
@@ -139,6 +204,39 @@ var (
 			BorderForeground(lipgloss.Color("238")).
 			PaddingTop(1)
 )
+
+// ==================== 辅助类型 ====================
+
+// timedNotification 带时间戳的通知消息
+type timedNotification struct {
+	text      string    // 消息内容
+	createdAt time.Time // 创建时间
+}
+
+// getStageStyle 根据游戏阶段返回对应的样式标签
+func getStageStyle(stageName string) string {
+	var bg, fg lipgloss.Color
+	switch stageName {
+	case "翻牌前":
+		bg, fg = lipgloss.Color("22"), lipgloss.Color("46") // 绿色
+	case "翻牌圈":
+		bg, fg = lipgloss.Color("24"), lipgloss.Color("81") // 青色
+	case "转牌圈":
+		bg, fg = lipgloss.Color("58"), lipgloss.Color("226") // 黄色
+	case "河牌圈":
+		bg, fg = lipgloss.Color("52"), lipgloss.Color("214") // 橙色
+	case "摊牌":
+		bg, fg = lipgloss.Color("53"), lipgloss.Color("213") // 紫色
+	default:
+		bg, fg = lipgloss.Color("237"), lipgloss.Color("250") // 灰色
+	}
+	return lipgloss.NewStyle().
+		Background(bg).
+		Foreground(fg).
+		Bold(true).
+		Padding(0, 1).
+		Render(stageName)
+}
 
 // ==================== 屏幕类型定义 ====================
 
@@ -213,8 +311,8 @@ type Model struct {
 	// 聊天
 	chatModel *components.ChatModel // 聊天组件
 
-	// 通知消息
-	notifications []string // 通知消息列表
+	// 通知消息（带时间戳，用于定时自动消失）
+	notifications []timedNotification // 通知消息列表
 
 	// 错误
 	err error // 错误信息
@@ -242,7 +340,7 @@ func NewModel() *Model {
 		connectField:   0,
 		connecting:     false,
 		actionInput:    "",
-		notifications:  make([]string, 0),
+		notifications:  make([]timedNotification, 0),
 		chatModel:      chat,
 		connected:      false,
 		extMsgChan:     make(chan tea.Msg, 100), // 缓冲通道
@@ -301,7 +399,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleKeyMsg(msg)
 
 	case tickMsg:
-		// tick 消息，继续检查通道
+		// tick 消息，清理过期通知并继续检查通道
+		m.cleanExpiredNotifications()
 		return m, m.tick()
 
 	case tea.WindowSizeMsg:
@@ -815,27 +914,39 @@ func (m *Model) sendAction(action models.ActionType, amount int) tea.Cmd {
 func (m *Model) viewGame() string {
 	var content strings.Builder
 
-	// 标题栏
-	title := styleTitle.Render("Texas Hold'em Poker")
+	// 标题栏 + 连接状态
+	title := styleTitle.Render("♠ Texas Hold'em Poker ♥")
+	connStatus := ""
+	if m.connected {
+		connStatus = styleActive.Render("● 已连接")
+	} else {
+		connStatus = styleWarning.Render("○ 未连接")
+	}
 	playerInfo := styleSubtitle.Render(fmt.Sprintf("玩家: %s", m.playerName))
-	content.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, title, "    ", playerInfo))
+	content.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, title, "  ", connStatus, "  ", playerInfo))
 	content.WriteString("\n")
 
-	// 游戏状态行
+	// 游戏状态行（彩色阶段标签 + 大号底池 + 当前下注）
 	if m.gameState != nil {
-		stage := m.gameState.Stage.String()
-		pot := stylePot.Render(fmt.Sprintf("底池: %d", m.gameState.Pot))
-		dealer := fmt.Sprintf("庄家: [%d]", m.gameState.DealerButton+1)
+		stageName := m.gameState.Stage.String()
+		stageLabel := getStageStyle(stageName)
 
-		content.WriteString(styleBox.Render(
-			lipgloss.JoinHorizontal(lipgloss.Top,
-				fmt.Sprintf(" 阶段: %s ", stage),
-				"    ",
-				pot,
-				"    ",
-				dealer,
-			),
-		))
+		potDisplay := stylePotLarge.Render(fmt.Sprintf(" 底池 %d ", m.gameState.Pot))
+
+		betDisplay := ""
+		if m.gameState.CurrentBet > 0 {
+			betDisplay = styleAction.Render(fmt.Sprintf("当前注: %d", m.gameState.CurrentBet))
+		}
+
+		dealerDisplay := styleDealer.Render(fmt.Sprintf(" Ⓓ 座位%d ", m.gameState.DealerButton+1))
+
+		statusParts := []string{stageLabel, "  ", potDisplay}
+		if betDisplay != "" {
+			statusParts = append(statusParts, "  ", betDisplay)
+		}
+		statusParts = append(statusParts, "  ", dealerDisplay)
+
+		content.WriteString(lipgloss.JoinHorizontal(lipgloss.Center, statusParts...))
 		content.WriteString("\n\n")
 	}
 
@@ -847,16 +958,13 @@ func (m *Model) viewGame() string {
 	content.WriteString(m.renderPlayers())
 	content.WriteString("\n")
 
-	// 通知消息
-	if len(m.notifications) > 0 {
-		content.WriteString(styleSubtitle.Render("────────────────────────────────────"))
-		content.WriteString("\n")
-		for _, msg := range m.notifications {
-			content.WriteString(styleHighlight.Render("  " + msg))
+	// 通知消息（只显示未过期的）
+	activeNotifs := m.getActiveNotifications()
+	if len(activeNotifs) > 0 {
+		for _, n := range activeNotifs {
+			content.WriteString(styleNotification.Render("  💬 " + n.text))
 			content.WriteString("\n")
 		}
-		// 清空通知
-		m.notifications = make([]string, 0)
 	}
 
 	// 动作提示
@@ -866,10 +974,16 @@ func (m *Model) viewGame() string {
 	return content.String()
 }
 
-// renderCommunityCards 渲染公共牌
+// renderCommunityCards 渲染公共牌（分组显示：翻牌 | 转牌 | 河牌）
 func (m *Model) renderCommunityCards() string {
 	if m.gameState == nil {
-		return styleSubtitle.Render("公共牌: 等待发牌")
+		// 全部占位
+		placeholder := styleCardPlaceholder.Render("[   ]  [   ]  [   ]") +
+			styleCardSeparator.Render("  │  ") +
+			styleCardPlaceholder.Render("[   ]") +
+			styleCardSeparator.Render("  │  ") +
+			styleCardPlaceholder.Render("[   ]")
+		return styleCommunityArea.Render(placeholder)
 	}
 
 	var cards []card.Card
@@ -879,77 +993,124 @@ func (m *Model) renderCommunityCards() string {
 		}
 	}
 
-	if len(cards) == 0 {
-		return styleSubtitle.Render("公共牌: [  ?  ] [  ?  ] [  ?  ] [  ?  ] [  ?  ]")
+	// 构建分组显示
+	var display strings.Builder
+
+	// 翻牌（前3张）
+	if len(cards) >= 3 {
+		display.WriteString(components.RenderCardsCompact(cards[:3], true))
+	} else if len(cards) > 0 {
+		display.WriteString(components.RenderCardsCompact(cards, true))
+		for i := len(cards); i < 3; i++ {
+			display.WriteString(" " + styleCardPlaceholder.Render("[   ]"))
+		}
+	} else {
+		display.WriteString(styleCardPlaceholder.Render("[   ]  [   ]  [   ]"))
 	}
 
-	return styleSubtitle.Render("公共牌: ") + components.RenderCardsCompact(cards, true)
+	display.WriteString(styleCardSeparator.Render("  │  "))
+
+	// 转牌（第4张）
+	if len(cards) >= 4 {
+		display.WriteString(components.RenderCardsCompact(cards[3:4], true))
+	} else {
+		display.WriteString(styleCardPlaceholder.Render("[   ]"))
+	}
+
+	display.WriteString(styleCardSeparator.Render("  │  "))
+
+	// 河牌（第5张）
+	if len(cards) >= 5 {
+		display.WriteString(components.RenderCardsCompact(cards[4:5], true))
+	} else {
+		display.WriteString(styleCardPlaceholder.Render("[   ]"))
+	}
+
+	return styleCommunityArea.Render(display.String())
 }
 
-// renderPlayers 渲染玩家列表
+// renderPlayers 渲染玩家列表（卡片式布局）
 func (m *Model) renderPlayers() string {
 	if m.gameState == nil || len(m.gameState.Players) == 0 {
 		return styleSubtitle.Render("玩家: 等待加入...")
 	}
 
-	var parts []string
-	parts = append(parts, styleSubtitle.Render("玩家:"))
-	parts = append(parts, "\n")
+	var playerCards []string
 
 	for _, p := range m.gameState.Players {
-		// 玩家状态
-		status := ""
-		switch p.Status {
-		case models.PlayerStatusActive:
-			if p.IsSelf {
-				status = styleActive.Render("【你】")
-			} else {
-				status = styleInactive.Render("    ")
-			}
-		case models.PlayerStatusFolded:
-			status = styleInactive.Render("已弃牌")
-		case models.PlayerStatusAllIn:
-			status = styleHighlight.Render("全下  ")
-		default:
-			status = styleInactive.Render("    ")
-		}
+		var cardContent strings.Builder
 
-		// 是否当前玩家
-		current := ""
-		if m.gameState != nil && m.gameState.CurrentPlayer == p.Seat {
-			current = styleCurrentPlayer.Render("◀")
-		}
-
-		// 是否庄家
-		dealer := ""
+		// 第一行：庄家标记 + 玩家名 + 状态标签
+		nameLine := ""
 		if p.IsDealer {
-			dealer = "[D]"
+			nameLine += styleDealer.Render(" Ⓓ ") + " "
 		}
 
-		// 玩家信息行
-		line := fmt.Sprintf("  [%d] %s %-10s 筹码:%-4d 下注:%-3d %s %s",
-			p.Seat+1, dealer, p.Name, p.Chips, p.CurrentBet, status, current)
-		parts = append(parts, line)
+		switch p.Status {
+		case models.PlayerStatusFolded:
+			nameLine += styleInactive.Render(p.Name)
+			nameLine += " " + styleInactive.Render("[弃牌]")
+		case models.PlayerStatusAllIn:
+			nameLine += lipgloss.NewStyle().Foreground(lipgloss.Color("213")).Bold(true).Render(p.Name)
+			nameLine += " " + styleBtnAllIn.Render(" ALL IN ")
+		default:
+			if p.IsSelf {
+				nameLine += styleActive.Render(p.Name) + " " + styleActive.Render("★")
+			} else {
+				nameLine += lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Render(p.Name)
+			}
+		}
+		cardContent.WriteString(nameLine)
+		cardContent.WriteString("\n")
 
-		// 底牌行
+		// 第二行：筹码和下注
+		chipsText := fmt.Sprintf("💰 %d", p.Chips)
+		betText := ""
+		if p.CurrentBet > 0 {
+			betText = fmt.Sprintf("  🎯 下注: %d", p.CurrentBet)
+		}
+		if p.Status == models.PlayerStatusFolded {
+			cardContent.WriteString(styleInactive.Render(chipsText + betText))
+		} else {
+			cardContent.WriteString(stylePot.Render(chipsText))
+			if betText != "" {
+				cardContent.WriteString(styleSubtitle.Render(betText))
+			}
+		}
+		cardContent.WriteString("\n")
+
+		// 第三行：底牌
 		if p.IsSelf && p.HoleCards[0].Rank != 0 {
 			holeCards := components.RenderCardsCompact(p.HoleCards[:], true)
-			parts = append(parts, fmt.Sprintf("      底牌: %s", holeCards))
+			cardContent.WriteString("🃏 " + holeCards)
 		} else if p.HoleCards[0].Rank != 0 {
-			// 其他玩家的底牌（只在摊牌时显示）
 			holeCards := components.RenderCardsCompact(p.HoleCards[:], true)
-			parts = append(parts, fmt.Sprintf("      底牌: %s", holeCards))
+			cardContent.WriteString("🃏 " + holeCards)
 		} else {
-			parts = append(parts, "      底牌: [??] [??]")
+			if p.Status == models.PlayerStatusFolded {
+				cardContent.WriteString(styleInactive.Render("🃏 [--] [--]"))
+			} else {
+				cardContent.WriteString(styleSubtitle.Render("🃏 [??] [??]"))
+			}
 		}
-		parts = append(parts, "\n")
+
+		// 选择卡片样式
+		var cardStyle lipgloss.Style
+		isCurrentPlayer := m.gameState != nil && m.gameState.CurrentPlayer == p.Seat
+		if isCurrentPlayer && p.Status != models.PlayerStatusFolded {
+			cardStyle = stylePlayerCardActive
+		} else if p.IsSelf {
+			cardStyle = stylePlayerCardSelf
+		} else if p.Status == models.PlayerStatusFolded {
+			cardStyle = stylePlayerCardFolded
+		} else {
+			cardStyle = stylePlayerCard
+		}
+
+		playerCards = append(playerCards, cardStyle.Render(cardContent.String()))
 	}
 
-	return lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("240")).
-		Padding(1).
-		Render(lipgloss.JoinVertical(lipgloss.Left, parts...))
+	return lipgloss.JoinHorizontal(lipgloss.Top, playerCards...)
 }
 
 // renderActionPrompt 渲染动作提示栏
@@ -1011,10 +1172,6 @@ func (m *Model) renderActionPrompt() string {
 		styleBtnFunc.Render(" Q 退出 "),
 	}
 	content.WriteString(strings.Join(funcActions, sep))
-
-	// 快捷键提示
-	content.WriteString("\n")
-	content.WriteString(styleInactive.Render("[↑/↓] 选择  [Enter] 确认  [Q] 退出"))
 
 	return styleActionBar.Render(content.String())
 }
@@ -1381,13 +1538,33 @@ func (m *Model) calculateToCall() int {
 	return 0
 }
 
-// addNotification 添加通知消息
+// addNotification 添加带时间戳的通知消息
 func (m *Model) addNotification(msg string) {
-	m.notifications = append(m.notifications, msg)
+	m.notifications = append(m.notifications, timedNotification{
+		text:      msg,
+		createdAt: time.Now(),
+	})
 	// 限制通知数量
-	if len(m.notifications) > 5 {
-		m.notifications = m.notifications[len(m.notifications)-5:]
+	if len(m.notifications) > 3 {
+		m.notifications = m.notifications[len(m.notifications)-3:]
 	}
+}
+
+// getActiveNotifications 获取未过期的通知消息（5秒自动消失）
+func (m *Model) getActiveNotifications() []timedNotification {
+	now := time.Now()
+	var active []timedNotification
+	for _, n := range m.notifications {
+		if now.Sub(n.createdAt) < 5*time.Second {
+			active = append(active, n)
+		}
+	}
+	return active
+}
+
+// cleanExpiredNotifications 清理过期的通知（在 Update 中调用，不在 View 中）
+func (m *Model) cleanExpiredNotifications() {
+	m.notifications = m.getActiveNotifications()
 }
 
 // SetClient 设置客户端（用于从 main.go 传入）
