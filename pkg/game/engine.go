@@ -147,6 +147,22 @@ func (e *GameEngine) GetState() *GameState {
 	return e.copyState()
 }
 
+// GetConfig 获取游戏配置（只读）
+func (e *GameEngine) GetConfig() Config {
+	return *e.config
+}
+
+// SetPlayerStatus 设置指定玩家的状态（线程安全）
+// 用于服务器在玩家中途加入时将其标记为弃牌等待下一局
+func (e *GameEngine) SetPlayerStatus(playerID string, status models.PlayerStatus) {
+	e.mutex.Lock()
+	defer e.mutex.Unlock()
+	if p := e.getPlayerByID(playerID); p != nil {
+		p.Status = status
+		log.Printf("[引擎] 设置玩家状态 | 玩家=%s | 新状态=%s", p.Name, status)
+	}
+}
+
 // AddPlayer 添加玩家到游戏
 func (e *GameEngine) AddPlayer(id, name string, seat int) (*models.Player, error) {
 	e.mutex.Lock()

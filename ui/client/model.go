@@ -10,6 +10,7 @@ import (
 	"github.com/wilenwang/just_play/Texas-Holdem/internal/card"
 	"github.com/wilenwang/just_play/Texas-Holdem/internal/common/models"
 	"github.com/wilenwang/just_play/Texas-Holdem/internal/protocol"
+	game "github.com/wilenwang/just_play/Texas-Holdem/pkg/game"
 	"github.com/wilenwang/just_play/Texas-Holdem/server/client"
 	"github.com/wilenwang/just_play/Texas-Holdem/ui/components"
 )
@@ -435,16 +436,27 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case GameStateMsg:
 		m.gameState = msg.State
-		// 如果在大厅屏幕，收到游戏状态则切换到游戏屏幕
+		// 只有当游戏真正开始（进入下注阶段）才从大厅切换到游戏屏幕
+		// 等待阶段的状态推送不应触发屏幕切换，玩家需要在大厅按准备
 		if m.screen == ScreenLobby {
-			m.screen = ScreenGame
+			stage := msg.State.Stage
+			if stage == game.StagePreFlop || stage == game.StageFlop ||
+				stage == game.StageTurn || stage == game.StageRiver {
+				m.screen = ScreenGame
+				m.selfReady = false
+				m.readyPlayers = nil
+			}
 		}
-		// 如果在摊牌或结算屏幕，收到新游戏状态（说明新局开始了）则返回游戏屏幕
+		// 只有当新局真正开始（活跃游戏阶段）时，才从结算屏幕返回游戏屏幕
+		// 避免摊牌阶段的异步状态推送将客户端从结算屏幕拉回游戏屏幕（竞态条件）
 		if m.screen == ScreenShowdown || m.screen == ScreenResult {
-			m.screen = ScreenGame
-			// 重置准备状态
-			m.selfReady = false
-			m.readyPlayers = nil
+			stage := msg.State.Stage
+			if stage == game.StagePreFlop || stage == game.StageFlop ||
+				stage == game.StageTurn || stage == game.StageRiver {
+				m.screen = ScreenGame
+				m.selfReady = false
+				m.readyPlayers = nil
+			}
 		}
 		return m, m.tick()
 
@@ -785,9 +797,13 @@ func (m *Model) viewConnect() string {
 // updateLobby 更新大厅屏幕
 func (m *Model) updateLobby(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "enter":
-		// 进入游戏（实际上游戏由服务器控制）
-		m.addNotification("等待游戏开始...")
+	case "enter", " ":
+		// 按准备/取消准备
+		if !m.selfReady {
+			m.selfReady = true
+			m.addNotification("已准备，等待其他玩家...")
+			return m, tea.Batch(m.sendReadyForNext(), m.tick())
+		}
 		return m, m.tick()
 
 	case "h":
@@ -805,46 +821,85 @@ func (m *Model) viewLobby() string {
 	var content strings.Builder
 
 	// 标题
-	content.WriteString(styleTitle.Render("Texas Hold'em Poker"))
+	content.WriteString(styleTitle.Render("♠ Texas Hold'em Poker ♥"))
 	content.WriteString("\n\n")
 
 	// 玩家信息
-	content.WriteString(styleSubtitle.Render("玩家信息"))
+	content.WriteString(styleSubtitle.Render("你的信息"))
 	content.WriteString("\n")
-	content.WriteString(fmt.Sprintf("  ID: %s\n", m.playerID))
 	content.WriteString(fmt.Sprintf("  名称: %s\n", m.playerName))
 	content.WriteString("\n")
 
-	// 游戏状态
+	// 已连接的玩家列表（含准备状态）
 	if m.gameState != nil && len(m.gameState.Players) > 0 {
-		content.WriteString(styleSubtitle.Render("已连接玩家:"))
+		totalPlayers := len(m.gameState.Players)
+		readyCount := len(m.readyPlayers)
+		content.WriteString(styleSubtitle.Render(fmt.Sprintf("牌桌玩家 (%d人):", totalPlayers)))
 		content.WriteString("\n")
+
 		for _, p := range m.gameState.Players {
-			status := "游戏中"
-			if p.Status == models.PlayerStatusInactive {
-				status = "未入座"
+			// 判断该玩家是否已准备
+			isReady := false
+			for _, readyName := range m.readyPlayers {
+				if readyName == p.Name {
+					isReady = true
+					break
+				}
 			}
-			marker := " "
+
+			// 标记图标
+			marker := "  "
 			if p.ID == m.playerID {
-				marker = "★"
+				marker = "★ "
 			}
-			content.WriteString(fmt.Sprintf("  %s [%d] %s - %s\n",
-				marker, p.Seat+1, p.Name, status))
+
+			// 准备状态
+			readyTag := styleInactive.Render("[等待中]")
+			if isReady {
+				readyTag = styleActive.Render("[已准备]")
+			}
+
+			playerLine := fmt.Sprintf("  %s[座位%d] %-12s %s", marker, p.Seat+1, p.Name, readyTag)
+			content.WriteString(playerLine)
+			content.WriteString("\n")
+		}
+
+		content.WriteString("\n")
+
+		// 准备状态汇总
+		if readyCount > 0 {
+			content.WriteString(styleSubtitle.Render(fmt.Sprintf("准备进度: %d/%d", readyCount, totalPlayers)))
+		} else {
+			content.WriteString(styleInactive.Render("等待玩家准备..."))
 		}
 	} else {
 		content.WriteString(styleInactive.Render("等待其他玩家加入..."))
 	}
-	content.WriteString("\n")
-
-	// 提示
-	content.WriteString(styleSubtitle.Render("等待游戏开始..."))
 	content.WriteString("\n\n")
+
+	// 准备按钮
+	if m.selfReady {
+		content.WriteString(styleActive.Render("  ✓ 你已准备，等待其他玩家..."))
+	} else {
+		content.WriteString(styleBtnCall.Render(" Enter 准备开始 "))
+	}
+	content.WriteString("\n\n")
+
+	// 通知消息
+	activeNotifs := m.getActiveNotifications()
+	if len(activeNotifs) > 0 {
+		for _, n := range activeNotifs {
+			content.WriteString(styleNotification.Render("  " + n.text))
+			content.WriteString("\n")
+		}
+		content.WriteString("\n")
+	}
 
 	// 快捷键提示
 	content.WriteString(styleInactive.Render("[H] 聊天  [Ctrl+C] 退出"))
 
 	return lipgloss.Place(
-		60, 25,
+		65, 30,
 		lipgloss.Center, lipgloss.Center,
 		styleBox.Render(content.String()),
 	)
@@ -1110,7 +1165,32 @@ func (m *Model) renderPlayers() string {
 		playerCards = append(playerCards, cardStyle.Render(cardContent.String()))
 	}
 
-	return lipgloss.JoinHorizontal(lipgloss.Top, playerCards...)
+	// 根据终端宽度自动换行排列玩家卡片
+	// 每张卡片宽度约 32（含边框），计算每行能放几张
+	cardWidth := 32
+	cardsPerRow := 3 // 默认每行3张
+	if m.winWidth > 0 {
+		cardsPerRow = m.winWidth / cardWidth
+		if cardsPerRow < 1 {
+			cardsPerRow = 1
+		}
+		if cardsPerRow > len(playerCards) {
+			cardsPerRow = len(playerCards)
+		}
+	}
+
+	// 按行分组
+	var rows []string
+	for i := 0; i < len(playerCards); i += cardsPerRow {
+		end := i + cardsPerRow
+		if end > len(playerCards) {
+			end = len(playerCards)
+		}
+		row := lipgloss.JoinHorizontal(lipgloss.Top, playerCards[i:end]...)
+		rows = append(rows, row)
+	}
+
+	return lipgloss.JoinVertical(lipgloss.Left, rows...)
 }
 
 // renderActionPrompt 渲染动作提示栏

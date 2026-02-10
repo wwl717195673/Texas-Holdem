@@ -84,8 +84,12 @@ func (s *Server) handleJoin(client *Client, data []byte) {
 		req.PlayerName, seat, player.Chips, len(state.Players))
 	s.logPlayerList(state)
 
-	// 检查是否达到最低玩家数，自动开始游戏
-	s.tryAutoStartHand()
+	// 如果游戏正在进行中（不是等待/结算阶段），将新玩家标记为弃牌，等下一局参与
+	if state.Stage != gamepkg.StageWaiting && state.Stage != gamepkg.StageShowdown && state.Stage != gamepkg.StageEnd {
+		s.gameEngine.SetPlayerStatus(client.ID, models.PlayerStatusFolded)
+		log.Printf("[加入] 游戏进行中，玩家 %s 标记为弃牌，等待下一局参与", req.PlayerName)
+	}
+	// 不再自动开局，改为大厅准备制：所有玩家按准备后才开始
 }
 
 // handleLeave 处理玩家离开游戏
@@ -117,6 +121,13 @@ func (s *Server) handlePlayerAction(client *Client, data []byte) {
 	log.Printf("[动作] 收到请求 | 玩家=%s | 动作=%s | 金额=%d | 当前阶段=%s | 底池=%d | 当前下注=%d",
 		client.Name, actionName(req.Action), req.Amount, beforeState.Stage, beforeState.Pot, beforeState.CurrentBet)
 
+	// 检查游戏是否在下注阶段（等待/摊牌/结束阶段不接受玩家动作）
+	if beforeState.Stage == gamepkg.StageWaiting || beforeState.Stage == gamepkg.StageShowdown || beforeState.Stage == gamepkg.StageEnd {
+		log.Printf("[动作] 拒绝 | 玩家=%s | 原因=当前阶段(%s)不是下注阶段", client.Name, beforeState.Stage)
+		s.sendError(client.ID, "Game is not in a betting stage", 3003)
+		return
+	}
+
 	// 验证是否是该玩家的回合
 	if beforeState.CurrentPlayer >= len(beforeState.Players) {
 		log.Printf("[动作] 拒绝 | 玩家=%s | 原因=CurrentPlayer(%d) >= 玩家数(%d)",
@@ -143,19 +154,24 @@ func (s *Server) handlePlayerAction(client *Client, data []byte) {
 			client.Name, actionName(req.Action), req.Amount, err)
 		s.sendError(client.ID, err.Error(), 3002)
 
-		// 动作被拒绝，重新发送 YourTurn 通知客户端仍需行动
-		minAction := s.getMinAction(client.ID)
-		maxAction := s.getMaxAction(client.ID)
-		turnMsg := &protocol.YourTurn{
-			BaseMessage: protocol.NewBaseMessage(protocol.MsgTypeYourTurn),
-			PlayerID:    client.ID,
-			MinAction:   minAction,
-			MaxAction:   maxAction,
-			CurrentBet:  beforeState.CurrentBet,
-			TimeLeft:    30,
+		// 动作被拒绝，仅在游戏处于下注阶段时重新发送 YourTurn
+		// 非下注阶段（等待/摊牌/结束）不应重发，避免客户端误以为轮到自己
+		afterRejectState := s.gameEngine.GetState()
+		if afterRejectState.Stage == gamepkg.StagePreFlop || afterRejectState.Stage == gamepkg.StageFlop ||
+			afterRejectState.Stage == gamepkg.StageTurn || afterRejectState.Stage == gamepkg.StageRiver {
+			minAction := s.getMinAction(client.ID)
+			maxAction := s.getMaxAction(client.ID)
+			turnMsg := &protocol.YourTurn{
+				BaseMessage: protocol.NewBaseMessage(protocol.MsgTypeYourTurn),
+				PlayerID:    client.ID,
+				MinAction:   minAction,
+				MaxAction:   maxAction,
+				CurrentBet:  beforeState.CurrentBet,
+				TimeLeft:    30,
+			}
+			s.sendToClient(client.ID, turnMsg)
+			log.Printf("[动作] 重发行动通知 | 玩家=%s | 需补=%d | 最大=%d", client.Name, minAction, maxAction)
 		}
-		s.sendToClient(client.ID, turnMsg)
-		log.Printf("[动作] 重发行动通知 | 玩家=%s | 需补=%d | 最大=%d", client.Name, minAction, maxAction)
 		return
 	}
 
@@ -292,8 +308,10 @@ func (s *Server) getMaxAction(playerID string) int {
 // tryAutoStartHand 尝试自动开始新的一局（当玩家人数满足最低要求且当前没有进行中的游戏时）
 func (s *Server) tryAutoStartHand() {
 	state := s.gameEngine.GetState()
+	config := s.gameEngine.GetConfig()
+	minPlayers := config.MinPlayers
 
-	log.Printf("[自动开局] 检查条件 | 当前阶段=%s | 玩家数=%d", state.Stage, len(state.Players))
+	log.Printf("[自动开局] 检查条件 | 当前阶段=%s | 玩家数=%d | 最少=%d", state.Stage, len(state.Players), minPlayers)
 
 	// 仅在等待、摊牌、局结束状态下才能开始新的一局
 	if state.Stage != gamepkg.StageWaiting && state.Stage != gamepkg.StageShowdown && state.Stage != gamepkg.StageEnd {
@@ -301,9 +319,9 @@ func (s *Server) tryAutoStartHand() {
 		return
 	}
 
-	// 检查玩家数量是否满足最低要求
-	if len(state.Players) < 2 {
-		log.Printf("[自动开局] 跳过 | 原因=玩家数不足(需要>=2, 当前=%d)", len(state.Players))
+	// 检查玩家数量是否满足最低要求（使用配置的最少玩家数）
+	if len(state.Players) < minPlayers {
+		log.Printf("[自动开局] 跳过 | 原因=玩家数不足(需要>=%d, 当前=%d)", minPlayers, len(state.Players))
 		return
 	}
 
@@ -314,8 +332,8 @@ func (s *Server) tryAutoStartHand() {
 			activeWithChips++
 		}
 	}
-	if activeWithChips < 2 {
-		log.Printf("[自动开局] 跳过 | 原因=有筹码的玩家不足(需要>=2, 当前=%d)", activeWithChips)
+	if activeWithChips < minPlayers {
+		log.Printf("[自动开局] 跳过 | 原因=有筹码的玩家不足(需要>=%d, 当前=%d)", minPlayers, activeWithChips)
 		return
 	}
 
