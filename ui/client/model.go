@@ -222,6 +222,10 @@ type Model struct {
 	// 连接状态
 	connected bool // 是否已连接
 
+	// 终端窗口尺寸
+	winWidth  int // 终端宽度
+	winHeight int // 终端高度
+
 	// 外部消息通道（用于从 WebSocket 回调接收消息）
 	extMsgChan chan tea.Msg // 外部消息通道
 }
@@ -301,8 +305,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.tick()
 
 	case tea.WindowSizeMsg:
-		// 窗口大小变化，可以更新组件尺寸
-		// 继续等待外部消息
+		// 记录窗口尺寸，用于 View 填充保证每次输出行数一致
+		m.winWidth = msg.Width
+		m.winHeight = msg.Height
 		return m, m.tick()
 
 	// 服务器消息
@@ -440,24 +445,40 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View 渲染视图
 func (m *Model) View() string {
+	var content string
 	switch m.screen {
 	case ScreenConnect:
-		return m.viewConnect()
+		content = m.viewConnect()
 	case ScreenLobby:
-		return m.viewLobby()
+		content = m.viewLobby()
 	case ScreenGame:
-		return m.viewGame()
+		content = m.viewGame()
 	case ScreenAction:
-		return m.viewAction()
+		content = m.viewAction()
 	case ScreenShowdown:
-		return m.viewShowdown()
+		content = m.viewShowdown()
 	case ScreenResult:
-		return m.viewResult()
+		content = m.viewResult()
 	case ScreenChat:
-		return m.viewChat()
+		content = m.viewChat()
 	default:
-		return "未知屏幕"
+		content = "未知屏幕"
 	}
+
+	// 用空行填充到终端高度，防止旧内容残留（Bubble Tea 渲染行数减少时不会清除多余行）
+	return m.padToWindowHeight(content)
+}
+
+// padToWindowHeight 将内容填充到终端窗口高度，避免渲染残留
+func (m *Model) padToWindowHeight(content string) string {
+	if m.winHeight <= 0 {
+		return content
+	}
+	lines := strings.Count(content, "\n") + 1
+	if lines < m.winHeight {
+		content += strings.Repeat("\n", m.winHeight-lines)
+	}
+	return content
 }
 
 // ==================== 键盘消息处理 ====================
@@ -1120,57 +1141,25 @@ func (m *Model) viewShowdown() string {
 		}
 	}
 
-	// 所有玩家详情
-	content.WriteString(styleSubtitle.Render("玩家详情:"))
-	content.WriteString("\n")
-
-	for _, p := range m.showdown.AllPlayers {
-		// 赢家标记
-		marker := " "
-		if p.IsWinner {
-			marker = styleHighlight.Render("★")
-		}
-
-		if p.IsFolded {
-			// 弃牌玩家
-			content.WriteString(fmt.Sprintf("  %s %-10s [已弃牌]\n", marker, p.PlayerName))
-		} else {
-			// 未弃牌玩家
-			holeCards := components.RenderCardsCompact(p.HoleCards[:], true)
-			handName := p.HandName
-			if handName == "" {
-				handName = "-"
-			}
-			content.WriteString(fmt.Sprintf("  %s %-10s 底牌: %s  牌型: %s\n",
-				marker, p.PlayerName, holeCards, handName))
-		}
-
-		// 筹码变化
-		if p.WonAmount > 0 {
-			content.WriteString(styleActive.Render(fmt.Sprintf("              赢得 +%d (剩余: %d)\n", p.WonAmount, p.ChipsAfter)))
-		} else if p.WonAmount < 0 {
-			content.WriteString(styleInactive.Render(fmt.Sprintf("              输掉 %d (剩余: %d)\n", -p.WonAmount, p.ChipsAfter)))
-		} else {
-			content.WriteString(styleInactive.Render(fmt.Sprintf("              筹码不变 (剩余: %d)\n", p.ChipsAfter)))
-		}
-	}
-
-	content.WriteString("\n")
-
-	// 赢家列表
+	// 获胜者列表
 	if len(m.showdown.Winners) > 0 {
-		content.WriteString(styleHighlight.Render("赢家:"))
+		content.WriteString(styleHighlight.Render("获胜者:"))
 		content.WriteString("\n")
 		for _, w := range m.showdown.Winners {
 			handName := w.HandName
 			if handName == "" {
 				handName = "高牌"
 			}
-			content.WriteString(styleActive.Render(fmt.Sprintf("  ★ %s 以 [%s] 获胜 +%d\n",
+			content.WriteString(styleActive.Render(fmt.Sprintf("  ★ %s 以 [%s] 赢得 %d\n",
 				w.PlayerName, handName, w.WonChips)))
 		}
+		content.WriteString("\n")
 	}
 
+	// 所有玩家详情
+	content.WriteString(styleSubtitle.Render("玩家详情:"))
+	content.WriteString("\n")
+	content.WriteString(m.renderPlayerDetails(m.showdown.AllPlayers, ""))
 	content.WriteString("\n")
 	content.WriteString(styleInactive.Render("[Enter] 查看结算"))
 
@@ -1252,7 +1241,7 @@ func (m *Model) viewResult() string {
 
 	// 获胜者列表
 	if m.gameResult != nil && len(m.gameResult.Winners) > 0 {
-		content.WriteString(styleSubtitle.Render("获胜者:"))
+		content.WriteString(styleHighlight.Render("获胜者:"))
 		content.WriteString("\n")
 		for _, w := range m.gameResult.Winners {
 			handName := w.HandName
@@ -1273,34 +1262,7 @@ func (m *Model) viewResult() string {
 	if m.gameResult != nil {
 		content.WriteString(styleSubtitle.Render("玩家详情:"))
 		content.WriteString("\n")
-		for _, p := range m.gameResult.AllPlayers {
-			marker := " "
-			if p.IsWinner {
-				marker = "★"
-			}
-			isYou := ""
-			if p.PlayerName == m.playerName {
-				isYou = " ◀"
-			}
-
-			if p.IsFolded {
-				content.WriteString(fmt.Sprintf("  %s %-10s [已弃牌]%s\n", marker, p.PlayerName, isYou))
-			} else {
-				holeCards := components.RenderCardsCompact(p.HoleCards[:], true)
-				handName := p.HandName
-				if handName == "" {
-					handName = "-"
-				}
-				content.WriteString(fmt.Sprintf("  %s %-10s 底牌: %s  牌型: %s%s\n",
-					marker, p.PlayerName, holeCards, handName, isYou))
-			}
-
-			if p.WonAmount > 0 {
-				content.WriteString(styleActive.Render(fmt.Sprintf("              赢得 +%d (剩余: %d)\n", p.WonAmount, p.ChipsAfter)))
-			} else if p.WonAmount < 0 {
-				content.WriteString(styleInactive.Render(fmt.Sprintf("              输掉 %d (剩余: %d)\n", -p.WonAmount, p.ChipsAfter)))
-			}
-		}
+		content.WriteString(m.renderPlayerDetails(m.gameResult.AllPlayers, m.playerName))
 	}
 
 	content.WriteString("\n")
@@ -1451,6 +1413,61 @@ func (m *Model) SetGameState(state *protocol.GameState) {
 // GetGameState 获取游戏状态
 func (m *Model) GetGameState() *protocol.GameState {
 	return m.gameState
+}
+
+// renderPlayerDetails 渲染玩家结算详情（摊牌屏幕和结算屏幕共用）
+// selfName 为空时不标记"你"，非空时用于匹配当前玩家并添加标记
+func (m *Model) renderPlayerDetails(players []protocol.ShowdownPlayerDetail, selfName string) string {
+	var result strings.Builder
+	indent := "    " // 统一缩进（4空格，与标记对齐）
+
+	for _, p := range players {
+		// 第一行：标记 + 玩家名 + 状态/底牌
+		marker := "  "
+		if p.IsWinner {
+			marker = styleHighlight.Render("★ ")
+		}
+
+		selfTag := ""
+		if selfName != "" && p.PlayerName == selfName {
+			selfTag = styleCurrentPlayer.Render(" ◀")
+		}
+
+		if p.IsFolded {
+			// 弃牌玩家：标记 + 名字 + [已弃牌]
+			result.WriteString(fmt.Sprintf("  %s%-10s %s%s\n",
+				marker,
+				p.PlayerName,
+				styleInactive.Render("[已弃牌]"),
+				selfTag))
+		} else {
+			// 未弃牌玩家：标记 + 名字 + 底牌 + 牌型
+			holeCards := components.RenderCardsCompact(p.HoleCards[:], true)
+			handName := p.HandName
+			if handName == "" {
+				handName = "-"
+			}
+			result.WriteString(fmt.Sprintf("  %s%-10s 底牌: %s  牌型: %s%s\n",
+				marker,
+				p.PlayerName,
+				holeCards,
+				styleAction.Render(handName),
+				selfTag))
+		}
+
+		// 第二行：筹码变化（统一缩进对齐）
+		if p.WonAmount > 0 {
+			result.WriteString(styleActive.Render(fmt.Sprintf("%s赢得 +%d (剩余: %d)", indent, p.WonAmount, p.ChipsAfter)))
+		} else if p.WonAmount < 0 {
+			result.WriteString(styleWarning.Render(fmt.Sprintf("%s输掉 %d", indent, -p.WonAmount)) +
+				styleInactive.Render(fmt.Sprintf(" (剩余: %d)", p.ChipsAfter)))
+		} else {
+			result.WriteString(styleInactive.Render(fmt.Sprintf("%s筹码不变 (剩余: %d)", indent, p.ChipsAfter)))
+		}
+		result.WriteString("\n")
+	}
+
+	return result.String()
 }
 
 // getActionText 获取动作描述文本
