@@ -977,13 +977,16 @@ func (e *GameEngine) determineWinnersStandard() {
 			if bestPlayerIdx < 0 {
 				bestEval = eval
 				bestPlayerIdx = i
+				ties = []int{i} // 将第一个玩家也加入 ties 列表
 			} else {
 				cmp := e.evaluator.Compare(eval, bestEval)
 				if cmp > 0 {
+					// 新的最强手牌，重置 ties
 					bestEval = eval
 					bestPlayerIdx = i
 					ties = []int{i}
 				} else if cmp == 0 {
+					// 平局，追加到 ties
 					ties = append(ties, i)
 				}
 			}
@@ -991,7 +994,8 @@ func (e *GameEngine) determineWinnersStandard() {
 	}
 
 	// 分配底池
-	if len(ties) > 0 {
+	if len(ties) > 1 {
+		// 多人平局，平分底池
 		share := e.state.Pot / len(ties)
 		remainder := e.state.Pot % len(ties)
 		var tieNames []string
@@ -1004,8 +1008,9 @@ func (e *GameEngine) determineWinnersStandard() {
 			tieNames = append(tieNames, e.state.Players[idx].Name)
 		}
 		log.Printf("[引擎] 平局! | 玩家=%s | 每人分得=%d", strings.Join(tieNames, ", "), share)
-	} else if bestPlayerIdx >= 0 {
-		winner := e.state.Players[bestPlayerIdx]
+	} else if len(ties) == 1 {
+		// 唯一赢家
+		winner := e.state.Players[ties[0]]
 		log.Printf("[引擎] 获胜者=%s | 牌型=%s | 赢得底池=%d | 筹码: %d→%d",
 			winner.Name, bestEval.Rank, e.state.Pot, winner.Chips, winner.Chips+e.state.Pot)
 		winner.Chips += e.state.Pot
@@ -1050,21 +1055,24 @@ func (e *GameEngine) determineWinnersWithSidePots() {
 			if bestPlayerIdx < 0 {
 				bestEval = eval
 				bestPlayerIdx = playerIdx
+				ties = []int{playerIdx} // 将第一个玩家也加入 ties 列表
 			} else {
 				cmp := e.evaluator.Compare(eval, bestEval)
 				if cmp > 0 {
+					// 新的最强手牌，重置 ties
 					bestEval = eval
 					bestPlayerIdx = playerIdx
 					ties = []int{playerIdx}
 				} else if cmp == 0 {
+					// 平局，追加到 ties
 					ties = append(ties, playerIdx)
 				}
 			}
 		}
 
 		// 分配边池
-		if len(ties) > 0 {
-			// 平分边池
+		if len(ties) > 1 {
+			// 多人平局，平分边池
 			share := pot.Amount / len(ties)
 			remainder := pot.Amount % len(ties)
 			for _, idx := range ties {
@@ -1074,9 +1082,9 @@ func (e *GameEngine) determineWinnersWithSidePots() {
 					remainder--
 				}
 			}
-		} else if bestPlayerIdx >= 0 {
+		} else if len(ties) == 1 {
 			// 单人获胜
-			e.state.Players[bestPlayerIdx].Chips += pot.Amount
+			e.state.Players[ties[0]].Chips += pot.Amount
 		}
 
 		// 已结算的边池移除（从 qualifiedPlayers 中移除已获得池的玩家）
